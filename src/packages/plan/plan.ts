@@ -7,6 +7,8 @@ import { Readable } from 'stream';
 
 import { auth } from '../auth/middleware.js';
 import { parseJSONFile } from '../../util/fileParser.js';
+import { ImportRefused, importRun as runImportSequence } from './importRun.js';
+import { describe as describeRunTransfer, isRunTransfer, RunTransferError, validate } from './runTransfer.js';
 import { convertDateToDoy, getTimeDifference } from '../../util/time.js';
 import { HasuraError } from '../../types/hasura.js';
 import type {
@@ -707,6 +709,121 @@ async function uploadDataset(req: Request, res: Response) {
   }
 }
 
+/**
+ * Import a run transfer: a simulation PlanDev did not perform, as a first-class run.
+ *
+ * Beside `/importPlan` rather than inside it. The two share the plan half of the work but differ in
+ * everything around it -- a run transfer is schema-validated, may create its own mission model, and
+ * must ingest its results last -- and folding both into one handler would put the write-ordering
+ * contract behind a branch, where it is exactly the thing a reader needs to see.
+ *
+ * The response carries `notices` in the `{severity, message, subjects}` shape plandev-ui already
+ * renders, so a refusal and a successful-but-noteworthy import surface the same way.
+ */
+async function importRun(req: Request, res: Response) {
+  const authorizationHeader = req.get('authorization');
+  const {
+    headers: { 'x-hasura-role': roleHeader, 'x-hasura-user-id': userHeader },
+  } = req;
+  const { body, file } = req;
+  const { name, model_id, start_time, duration, simulation_template_id } = body as ImportPlanPayload;
+
+  const headers: HeadersInit = {
+    Authorization: authorizationHeader ?? '',
+    'Content-Type': 'application/json',
+    'x-hasura-role': roleHeader ? `${roleHeader}` : '',
+    'x-hasura-user-id': userHeader ? `${userHeader}` : '',
+  };
+
+  // The caller's role and user id are FORWARDED, never replaced by an admin secret. Whatever
+  // permissions are configured are therefore enforced end to end, which is the property that lets
+  // this be opened to planners later as a permissions change and nothing else.
+  const callGraphQL = async (query: string, variables: Record<string, unknown>) => {
+    const response = await fetch(GQL_API_URL, { body: JSON.stringify({ query, variables }), headers, method: 'POST' });
+    return await response.json();
+  };
+
+  logger.info(`POST /importRun: Importing run: ${name}`);
+
+  try {
+    const doc = await parseJSONFile<unknown>(file);
+
+    if (!isRunTransfer(doc)) {
+      // No `kind` at all: a legacy plan.json. Refused here rather than silently imported as a plain
+      // plan, because the two endpoints promise different things and doing less than asked without
+      // saying so is the failure this whole detection scheme exists to prevent.
+      res.status(400).json({
+        notices: [
+          {
+            message:
+              'This file is not a run transfer: it declares no `kind`. A plan file with no model declaration and no recorded results imports through /importPlan.',
+            severity: 'error',
+            subjects: ['kind'],
+          },
+        ],
+        success: false,
+      });
+      return;
+    }
+
+    const { run, warnings } = validate(doc);
+
+    const imported = await runImportSequence(
+      run,
+      {
+        duration,
+        modelId: model_id === undefined ? undefined : Number(model_id),
+        name,
+        simulationTemplateId: simulation_template_id === undefined ? undefined : Number(simulation_template_id),
+        startTime: start_time,
+      },
+      callGraphQL,
+      warnings,
+    );
+
+    logger.info(
+      `POST /importRun: Imported run: plan ${imported.plan.id}, model ${imported.modelId}, dataset ${imported.simulationDatasetId}`,
+    );
+    res.json({ ...imported, success: true });
+  } catch (error) {
+    if (error instanceof RunTransferError || error instanceof ImportRefused) {
+      // 422: the request was well-formed and understood, and refused on its content. `layer` says
+      // WHICH check refused it -- schema, importer, or gate -- which is the difference between "fix
+      // the file's shape" and "the run disagrees with the model it declares".
+      logger.info(`POST /importRun: refused at the ${error.layer} layer: ${error.message}`);
+      res.status(422).json({ layer: error.layer, notices: error.notices, success: false });
+      return;
+    }
+    logger.error(`POST /importRun: Error occurred during run ${name} import`);
+    logger.error(error);
+    res.status(500).json({
+      notices: [{ message: (error as Error).message, severity: 'error', subjects: ['file'] }],
+      success: false,
+    });
+  }
+}
+
+/**
+ * Say what a file is, without importing it.
+ *
+ * The UI already peeks at an uploaded plan file to prefill name, start and duration; this gives it a
+ * straight answer about what the file actually is, so it can say "Recorded run -- N directives, M
+ * resources, K spans" instead of discovering the difference at submit time. Keyed on `kind` and
+ * `version` rather than guessed from shape, so a truncated run file is an error rather than a silent
+ * partial import.
+ */
+async function describeRunFile(req: Request, res: Response) {
+  try {
+    const doc = await parseJSONFile<unknown>(req.file);
+    res.json({ isRunTransfer: isRunTransfer(doc), notices: describeRunTransfer(doc), success: true });
+  } catch (error) {
+    res.status(400).json({
+      notices: [{ message: (error as Error).message, severity: 'error', subjects: ['file'] }],
+      success: false,
+    });
+  }
+}
+
 export default (app: Express) => {
   /**
    * @swagger
@@ -757,6 +874,86 @@ export default (app: Express) => {
    *       - Hasura
    */
   app.post('/importPlan', upload.single('plan_file'), refreshLimiter, auth, importPlan);
+
+  /**
+   * @swagger
+   * /importRun:
+   *   post:
+   *     security:
+   *       - bearerAuth: []
+   *     consumes:
+   *       - multipart/form-data
+   *     produces:
+   *       - application/json
+   *     parameters:
+   *      - in: header
+   *        name: x-hasura-role
+   *        schema:
+   *          type: string
+   *          required: false
+   *     requestBody:
+   *       content:
+   *         multipart/form-data:
+   *          schema:
+   *            type: object
+   *            properties:
+   *              run_file:
+   *                description: A .run.json run transfer file
+   *                format: binary
+   *                type: string
+   *              name:
+   *                type: string
+   *              model_id:
+   *                description: Only when the file declares no model of its own
+   *                type: integer
+   *              start_time:
+   *                type: string
+   *              duration:
+   *                type: string
+   *              simulation_template_id:
+   *                type: integer
+   *     responses:
+   *       200:
+   *         description: The imported plan, its mission model, and the simulation dataset holding the run
+   *       422:
+   *         description: Refused on content, with the layer that refused it and field-level notices
+   *       403:
+   *         description: Unauthorized error
+   *       401:
+   *         description: Unauthenticated error
+   *     summary: Import a recorded simulation as a first-class run
+   *     tags:
+   *       - Hasura
+   */
+  app.post('/importRun', upload.single('run_file'), refreshLimiter, auth, importRun);
+
+  /**
+   * @swagger
+   * /describeRunFile:
+   *   post:
+   *     security:
+   *       - bearerAuth: []
+   *     consumes:
+   *       - multipart/form-data
+   *     produces:
+   *       - application/json
+   *     requestBody:
+   *       content:
+   *         multipart/form-data:
+   *          schema:
+   *            type: object
+   *            properties:
+   *              run_file:
+   *                format: binary
+   *                type: string
+   *     responses:
+   *       200:
+   *         description: What the file is, as notices, without importing it
+   *     summary: Report whether a file is a run transfer and what it contains
+   *     tags:
+   *       - Hasura
+   */
+  app.post('/describeRunFile', upload.single('run_file'), refreshLimiter, auth, describeRunFile);
 
   /**
    * @swagger

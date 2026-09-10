@@ -24,6 +24,15 @@ export default {
       }
     }
   `,
+  CREATE_MISSION_MODEL: `#graphql
+    mutation CreateMissionModel($model: mission_model_insert_input!) {
+      insert_mission_model_one(object: $model) {
+        id
+        name
+        version
+      }
+    }
+  `,
   CREATE_PLAN: `#graphql
     mutation CreatePlan($plan: plan_insert_input!) {
       createPlan: insert_plan_one(object: $plan) {
@@ -72,6 +81,13 @@ export default {
       }
     }
   `,
+  DELETE_MISSION_MODEL: `#graphql
+    mutation DeleteMissionModel($id: Int!) {
+      delete_mission_model_by_pk(id: $id) {
+        id
+      }
+    }
+  `,
   DELETE_PLAN: `#graphql
     mutation DeletePlan($id: Int!) {
       deletePlan: delete_plan_by_pk(id: $id) {
@@ -97,6 +113,19 @@ export default {
       }
     }
   `,
+  GET_MISSION_MODEL_BY_NATURAL_KEY: `#graphql
+    query GetMissionModelByNaturalKey($mission: String!, $name: String!, $version: String!) {
+      mission_model(where: {
+        mission: {_eq: $mission},
+        name: {_eq: $name},
+        version: {_eq: $version}
+      }) {
+        external_identity_hash
+        id
+        model_type
+      }
+    }
+  `,
   GET_TAGS: `#graphql
     query GetTags {
       tags(order_by: { name: desc })  {
@@ -106,6 +135,30 @@ export default {
         name
         owner
       }
+    }
+  `,
+  INGEST_EXTERNAL_SIMULATION_RESULTS: `#graphql
+    mutation IngestExternalSimulationResults($planId: Int!, $results: ExternalSimulationResults!) {
+      ingestExternalSimulationResults(planId: $planId, results: $results) {
+        simulationDatasetId
+      }
+    }
+  `,
+  REGISTER_MODEL_TYPES: `#graphql
+    mutation RegisterModelTypes(
+      $missionModelId: Int!,
+      $activityTypes: [ModelActivityTypeInput!]!,
+      $resourceTypes: [ModelResourceTypeInput!]!,
+      $parameters: [ModelParameterInput!]!) {
+        registerModelTypes(
+          missionModelId: $missionModelId,
+          activityTypes: $activityTypes,
+          resourceTypes: $resourceTypes,
+          parameters: $parameters) {
+          activityTypeCount
+          parameterCount
+          resourceTypeCount
+        }
     }
   `,
   UPDATE_ACTIVITY_DIRECTIVES: `#graphql
