@@ -5,7 +5,7 @@
  * spans and resource profiles) of a simulation somebody else already ran. This module turns that file
  * into a mission model, a plan, its directives, and one `simulation_dataset` with status `success`.
  *
- * The format reference is `RUN_TRANSFER.md` in plandev-examples/external-model-backends, and
+ * The format reference is `README.md` in plandev-examples/tools/run_transfer, and
  * `run-transfer.v1.schema.json` there is the source of truth for the schema vendored beside this file.
  *
  * Three things here are load-bearing and easy to undo by accident:

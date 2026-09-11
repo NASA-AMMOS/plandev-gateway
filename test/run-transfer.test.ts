@@ -29,7 +29,7 @@ import { runTransferSchema } from '../src/schemas/run-transfer-schema';
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtureRoot =
   process.env.RUN_TRANSFER_FIXTURES ??
-  resolve(here, '../../../plandev-examples/external-model-backends/run_transfer/fixtures');
+  resolve(here, '../../../plandev-examples/tools/run_transfer/fixtures');
 
 const haveFixtures = existsSync(fixtureRoot);
 
