@@ -23,6 +23,7 @@ import {
   SUPPORTED_VERSIONS,
   validate,
 } from '../src/packages/plan/runTransfer';
+import type { ModelDeclaration } from '../src/packages/plan/runTransfer';
 import { runTransferSchema } from '../src/schemas/run-transfer-schema';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -31,6 +32,12 @@ const fixtureRoot =
   resolve(here, '../../../plandev-examples/external-model-backends/run_transfer/fixtures');
 
 const haveFixtures = existsSync(fixtureRoot);
+
+/**
+ * The declaration digest of the valid fixture, pinned here and in plandev-examples'
+ * `test_adapter_core.py` against the same file. See the cross-implementation test below.
+ */
+const SYNTHETIC_DIGEST = 'a27d82bfcd1a4579';
 const withFixtures = haveFixtures ? describe : describe.skip;
 
 function fixture(relative: string): unknown {
@@ -270,6 +277,19 @@ describe('the declaration digest', () => {
 
   test('is 16 hex characters', () => {
     expect(declarationDigest(model)).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  test('agrees, byte for byte, with the producer-side implementation in plandev-examples', () => {
+    // The one assertion neither implementation can make alone. `adapter_core.declaration_digest`
+    // computes this in Python over the same fixture, and its test pins the same constant. If the two
+    // ever disagree, a re-imported run stops reusing the model it created and quietly makes a second
+    // one beside it -- which nothing else in either suite would notice.
+    if (!haveFixtures) {
+      return;
+    }
+    expect(declarationDigest((fixture('valid/synthetic.run.json') as { model: ModelDeclaration }).model)).toBe(
+      SYNTHETIC_DIGEST,
+    );
   });
 });
 
