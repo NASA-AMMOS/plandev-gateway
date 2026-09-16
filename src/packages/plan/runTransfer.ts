@@ -5,8 +5,8 @@
  * spans and resource profiles) of a simulation somebody else already ran. This module turns that file
  * into a mission model, a plan, its directives, and one `simulation_dataset` with status `success`.
  *
- * The format reference is `README.md` in plandev-examples/tools/run_transfer, and
- * `run-transfer.v1.schema.json` there is the source of truth for the schema vendored beside this file.
+ * The format reference is `README.md` in plandev-examples/tools/run_transfer. The schema this module
+ * compiles is the gateway's own, in `src/schemas/run-transfer-schema.ts`.
  *
  * Three things here are load-bearing and easy to undo by accident:
  *
@@ -155,7 +155,8 @@ export function describe(doc: unknown): Notice[] {
   if (!isRunTransfer(doc)) {
     return [
       {
-        message: 'Plan only. This is a plan file with no model declaration and no recorded results, and it imports exactly as it does today.',
+        message:
+          'Plan only. This is a plan file with no model declaration and no recorded results, and it imports exactly as it does today.',
         severity: 'info',
         subjects: ['file'],
       },
@@ -175,7 +176,9 @@ export function describe(doc: unknown): Notice[] {
   }
   if (!SUPPORTED_VERSIONS.includes(run.version)) {
     notices.push({
-      message: `Run transfer version '${run.version}' is not supported. This PlanDev accepts ${SUPPORTED_VERSIONS.map(v => `'${v}'`).join(', ')}.`,
+      message: `Run transfer version '${run.version}' is not supported. This PlanDev accepts ${SUPPORTED_VERSIONS.map(
+        v => `'${v}'`,
+      ).join(', ')}.`,
       severity: 'error',
       subjects: ['version'],
     });
@@ -205,7 +208,9 @@ export function describe(doc: unknown): Notice[] {
     notices.push({
       message:
         `Includes a new mission model declaration: ${run.model.mission}/${run.model.name}/${run.model.version} ` +
-        `(${run.model.activityTypes?.length ?? 0} activity types, ${run.model.resourceTypes?.length ?? 0} resource types).`,
+        `(${run.model.activityTypes?.length ?? 0} activity types, ${
+          run.model.resourceTypes?.length ?? 0
+        } resource types).`,
       severity: 'info',
       subjects: ['model'],
     });
@@ -244,7 +249,9 @@ function checkEnvelope(doc: unknown): void {
       {
         message: `Run transfer version ${
           version === undefined ? 'is missing' : `'${version}' is not supported`
-        }. This PlanDev accepts ${SUPPORTED_VERSIONS.map(v => `'${v}'`).join(', ')}. A version this reader does not know is refused rather than partially understood.`,
+        }. This PlanDev accepts ${SUPPORTED_VERSIONS.map(v => `'${v}'`).join(
+          ', ',
+        )}. A version this reader does not know is refused rather than partially understood.`,
         severity: 'error',
         subjects: ['version'],
       },

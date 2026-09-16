@@ -1,10 +1,12 @@
 /**
  * The run-transfer validation layers, against the same fixtures the format is frozen with.
  *
- * The fixtures live in plandev-examples (beside the format reference and the schema they were written
- * for) and are read from there rather than copied, so this suite cannot pass against a stale copy. If
- * that checkout is not present the fixture-driven tests skip with a reason rather than pretending to
- * have run -- but the layer-independent tests below still run everywhere.
+ * The fixtures live in plandev-examples, beside the format reference, and are read from there rather
+ * than copied, so this suite cannot pass against a stale copy. They are also what catches a schema
+ * that has drifted from the format: a drifted schema stops accepting the valid fixture, or stops
+ * rejecting an invalid one. Point RUN_TRANSFER_FIXTURES at that directory if the checkout is
+ * elsewhere. If it is not present at all, the fixture-driven tests skip with a reason rather than
+ * pretending to have run -- but the layer-independent tests below still run everywhere.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -28,8 +30,7 @@ import { runTransferSchema } from '../src/schemas/run-transfer-schema';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixtureRoot =
-  process.env.RUN_TRANSFER_FIXTURES ??
-  resolve(here, '../../../plandev-examples/tools/run_transfer/fixtures');
+  process.env.RUN_TRANSFER_FIXTURES ?? resolve(here, '../../../plandev-examples/tools/run_transfer/fixtures');
 
 const haveFixtures = existsSync(fixtureRoot);
 
@@ -55,17 +56,6 @@ describe('the schema this gateway compiles', () => {
     // ajv 6 does not support 2020-12, and it does not say so -- it silently ignores the keywords it
     // does not know, so a 2020-12 schema would appear to validate while enforcing almost nothing.
     expect(runTransferSchema.$schema).toBe('http://json-schema.org/draft-07/schema#');
-  });
-
-  test('is in sync with the source of truth in plandev-examples', () => {
-    if (!haveFixtures) {
-      return;
-    }
-    const source = JSON.parse(
-      readFileSync(resolve(fixtureRoot, '../run-transfer.v1.schema.json'), 'utf8'),
-    );
-    // The generated module sorts object keys, so compare parsed content rather than text.
-    expect(sortKeys(runTransferSchema)).toEqual(sortKeys(source));
   });
 });
 
@@ -105,7 +95,10 @@ withFixtures('the layer split', () => {
       const error = thrown as RunTransferError;
       expect(error.layer, entry.fixture).toBe('schema');
       expect(error.notices.length, entry.fixture).toBeGreaterThan(0);
-      expect(error.notices.every(({ subjects }) => subjects.length > 0), entry.fixture).toBe(true);
+      expect(
+        error.notices.every(({ subjects }) => subjects.length > 0),
+        entry.fixture,
+      ).toBe(true);
     }
   });
 
@@ -302,17 +295,3 @@ describe('canonical JSON', () => {
     expect(canonicalJSON({ a: { b: 'c' } })).toBe('{"a":{"b":"c"}}');
   });
 });
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(sortKeys);
-  }
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.keys(value as Record<string, unknown>)
-        .sort()
-        .map(key => [key, sortKeys((value as Record<string, unknown>)[key])]),
-    );
-  }
-  return value;
-}

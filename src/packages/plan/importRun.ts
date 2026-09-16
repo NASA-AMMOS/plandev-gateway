@@ -95,8 +95,7 @@ export async function importRun(
     } else {
       throw new ImportRefused('importer', [
         {
-          message:
-            'This file declares no mission model, so an existing one must be chosen to import it against.',
+          message: 'This file declares no mission model, so an existing one must be chosen to import it against.',
           severity: 'error',
           subjects: ['model'],
         },
@@ -232,11 +231,7 @@ async function resolveModel(
   return { modelId: createdModel.id, reused: false };
 }
 
-async function registerModelTypes(
-  modelId: number,
-  model: ModelDeclaration,
-  callGraphQL: GraphQLCaller,
-): Promise<void> {
+async function registerModelTypes(modelId: number, model: ModelDeclaration, callGraphQL: GraphQLCaller): Promise<void> {
   const response = await callGraphQL(gql.REGISTER_MODEL_TYPES, {
     activityTypes: model.activityTypes,
     missionModelId: modelId,
@@ -248,7 +243,9 @@ async function registerModelTypes(
     // typings cannot carry, a required parameter that is not declared. Its message is the product.
     throw new ImportRefused('gate', asNotices(response.errors, 'model'));
   }
-  logger.info(`POST /importRun: registered types for model ${modelId}: ${JSON.stringify(response?.data?.registerModelTypes)}`);
+  logger.info(
+    `POST /importRun: registered types for model ${modelId}: ${JSON.stringify(response?.data?.registerModelTypes)}`,
+  );
 }
 
 async function createPlan(
