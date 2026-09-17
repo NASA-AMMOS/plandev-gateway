@@ -1,4 +1,5 @@
 import type { UserId } from './auth';
+import type { ActivityDirectiveTransfer } from './plan-transfer.js';
 
 export type PlanSchema = {
   created_at: string;
@@ -77,16 +78,6 @@ export type ActivityDirectiveInsertInput = {
 };
 export type ActivityDirectiveSetInput = Pick<ActivityDirectiveInsertInput, 'anchor_id'>;
 
-export type ActivitiesJSON = Pick<
-  ActivityDirective,
-  'anchor_id' | 'anchored_to_start' | 'arguments' | 'id' | 'metadata' | 'name' | 'start_offset' | 'tags' | 'type'
->[];
+export type ActivitiesJSON = ActivityDirectiveTransfer[];
 
-export type PlanTransfer = Pick<PlanSchema, 'id' | 'duration' | 'model_id' | 'name' | 'start_time'> & {
-  activities: ActivitiesJSON;
-  end_time: string;
-  simulation_arguments: ArgumentsMap;
-  tags?: {
-    tag: TagsInsertInput;
-  }[];
-};
+export type { PlanTransfer } from './plan-transfer.js';

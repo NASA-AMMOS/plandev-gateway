@@ -156,7 +156,8 @@ async function createTags(
             return {
               ...prevTagsMap,
               [tagName]: {
-                color,
+                // `color` is optional on the wire; the DB column is nullable.
+                color: color ?? null,
                 name: tagName,
               },
             };
