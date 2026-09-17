@@ -1,7 +1,7 @@
 import type { UserId } from './auth';
 import type { ActivityDirectiveTransfer } from './plan-transfer.js';
 
-export type PlanSchema = {
+export type CreatedPlan = {
   created_at: string;
   duration: string;
   id: number;
@@ -15,7 +15,7 @@ export type PlanSchema = {
   updated_by: UserId;
 };
 
-export type PlanInsertInput = Pick<PlanSchema, 'duration' | 'model_id' | 'name' | 'start_time'>;
+export type PlanInsertInput = Pick<CreatedPlan, 'duration' | 'model_id' | 'name' | 'start_time'>;
 
 export type PlanTagsInsertInput = {
   plan_id: number;

@@ -15,7 +15,7 @@ import type {
   ActivityDirectiveInsertInput,
   ImportPlanPayload,
   PlanInsertInput,
-  PlanSchema,
+  CreatedPlan,
   PlanTagsInsertInput,
   PlanTransfer,
   Tag,
@@ -270,7 +270,7 @@ async function importPlan(req: Request, res: Response) {
     'x-hasura-user-id': userHeader ? `${userHeader}` : '',
   };
 
-  let createdPlan: PlanSchema | null = null;
+  let createdPlan: CreatedPlan | null = null;
 
   let createdTags: Tag[] = [];
   let tagsMap: Record<string, Tag>;
@@ -327,14 +327,14 @@ async function importPlan(req: Request, res: Response) {
 
         const activityDirectivesInsertInput = await remapActivities(activities, createdPlan.id, tagsMap);
 
-        await createActivities(activityDirectivesInsertInput, activities, (createdPlan as PlanSchema).id, headers);
+        await createActivities(activityDirectivesInsertInput, activities, (createdPlan as CreatedPlan).id, headers);
 
         // associate the tags with the newly created plan
         logger.info(`POST /importPlan: Importing plan tags: ${name}`);
         const parsedTags: number[] = JSON.parse(tags);
 
         const tagsInsert: PlanTagsInsertInput[] = parsedTags.map(tagId => ({
-          plan_id: (createdPlan as PlanSchema).id,
+          plan_id: (createdPlan as CreatedPlan).id,
           tag_id: tagId,
         }));
 
