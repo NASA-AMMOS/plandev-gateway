@@ -94,6 +94,10 @@ export type ModelDeclaration = {
    * Optional schemas for `simulation_arguments`.
    */
   parameters?: ModelParameter[];
+  /**
+   * Optional user-provided `metadata` object
+   */
+  metadata: Record<string, any>
 };
 
 export type SimulatedActivitySpan = {

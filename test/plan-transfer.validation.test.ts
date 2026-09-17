@@ -84,6 +84,10 @@ describe('PlanTransfer v3 schema', () => {
       expectValid({ ...plainPlan, model: emptyModel });
     });
 
+    test('a plan with a model with metadata', () => {
+      expectValid({ ...plainPlan, model: { ...emptyModel, metadata: {test: "metadata"} } });
+    });
+
     test('a plan with a model and results, inheriting the plan window', () => {
       expectValid(withResults({ profiles: {}, spans: [] }));
     });

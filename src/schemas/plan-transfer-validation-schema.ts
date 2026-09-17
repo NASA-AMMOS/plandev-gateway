@@ -194,6 +194,9 @@ export const planTransferSchema = {
             $ref: '#/definitions/model_parameter',
           },
         },
+        metadata: {
+          type: 'object',
+        }
       },
       required: ['activity_types', 'resource_types'],
     },

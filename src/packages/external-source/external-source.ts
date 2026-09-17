@@ -125,8 +125,6 @@ export function updateSchemaWithDefs(defs: { event_types: any; source_type: any 
     };
   }
 
-  logger.info(JSON.stringify(localSchemaCopy));
-
   // Compile & return full schema with 'defs' added
   const localAjv = new Ajv();
   return localAjv.compile(localSchemaCopy);
