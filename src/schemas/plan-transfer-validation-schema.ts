@@ -1,11 +1,7 @@
 /**
  * JSON Schema for the PlanTransfer v3 wire format. Kept in lockstep with the
- * TypeScript types in `src/types/plan-transfer.ts`.
- *
- * This validates structure only. Cross-object relationships (unique activity
- * IDs, anchor/directive/parent resolution, activity & resource types existing
- * in the embedded model, values conforming to their declared ValueSchemas)
- * belong to the later semantic import validator.
+ * TypeScript types in `src/types/plan-transfer.ts`. Validates structural
+ * parts of the schema but not internal relationships and rules.
  */
 
 /* eslint-disable sort-keys -- key order mirrors the wire format */
@@ -40,8 +36,7 @@ export const planTransferSchema = {
       required: ['tag'],
     },
 
-    // Mirrors the Merlin backend ValueSchema serialization surface. Notably there
-    // is no `secret` variant on the wire, even though the UI's local type is broader.
+    // Mirrors backend ValueSchema with the exception of the `secret` variant.
     value_schema: {
       oneOf: [
         {

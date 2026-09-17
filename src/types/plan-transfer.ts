@@ -9,16 +9,12 @@
  *   plan + model + results   VALID
  *   plan + results, no model INVALID
  *
- * The wire format uses snake_case. The matching JSON Schema lives in
+ * The matching JSON Schema lives in
  * `src/schemas/plan-transfer-validation-schema.ts`.
  */
 
 export type SerializedValue = null | boolean | number | string | SerializedValue[] | { [key: string]: SerializedValue };
 
-/**
- * Matches the tag shape PlanDev already exports (`Pick<Tag, 'color' | 'name'>`):
- * `color` is required but nullable, not optional.
- */
 export type TransferTag = {
   tag: {
     name: string;
@@ -27,10 +23,7 @@ export type TransferTag = {
 };
 
 /**
- * Mirrors the Merlin backend ValueSchema serialization format.
- * Keep this type aligned with the backend representation rather than the
- * UI's broader local type. In particular, `secret` is not part of this
- * wire format.
+ * Mirrors backend ValueSchema with the exception of the `secret` variant.
  */
 export type ValueSchema = { metadata?: Record<string, SerializedValue> } & (
   | { type: 'real' | 'int' | 'boolean' | 'string' | 'duration' | 'path' }
