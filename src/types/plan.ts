@@ -1,5 +1,4 @@
 import type { UserId } from './auth';
-import type { ActivityDirectiveTransfer } from './plan-transfer.js';
 
 export type CreatedPlan = {
   created_at: string;
@@ -77,7 +76,3 @@ export type ActivityDirectiveInsertInput = {
   type: string;
 };
 export type ActivityDirectiveSetInput = Pick<ActivityDirectiveInsertInput, 'anchor_id'>;
-
-export type ActivitiesJSON = ActivityDirectiveTransfer[];
-
-export type { PlanTransfer } from './plan-transfer.js';
