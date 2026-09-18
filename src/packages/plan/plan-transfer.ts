@@ -5,7 +5,7 @@ import type { PlanTransfer } from '../../types/plan-transfer.js';
 /**
  * Compatibility boundary for uploaded plan files.
  *
- * Older supported PlanTransfer versions are migrated to the current canonical
+ * Older supported PlanTransfer versions are migrated to the current
  * version and only then validated against its schema, so the rest of the
  * gateway only ever sees a current PlanTransfer.
  *
@@ -16,8 +16,6 @@ import type { PlanTransfer } from '../../types/plan-transfer.js';
  *   v2           previous version; structurally a subset of v3
  *   versionless  pre-version export using the same shape as v2
  */
-
-export const CURRENT_PLAN_TRANSFER_VERSION = '3';
 
 const ajv = new Ajv({ allErrors: true });
 const validatePlanTransfer = ajv.compile(planTransferSchema);
@@ -56,7 +54,7 @@ function migrateV2ToV3(input: JsonObject): JsonObject {
  * To add v4 later, each case migrates through to the current version, e.g.
  * `case '2': return migrateV3ToV4(migrateV2ToV3(input))`.
  */
-export function migratePlanTransfer(input: unknown): JsonObject {
+function migratePlanTransfer(input: unknown): JsonObject {
   if (!isObject(input)) {
     throw new UnsupportedPlanTransferError('Plan file must contain a JSON object.');
   }

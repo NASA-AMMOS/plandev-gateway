@@ -221,7 +221,7 @@ describe('PlanTransfer v3 schema', () => {
 
     test('v2 does not directly validate as canonical PlanTransfer v3', () => {
       // v2 is accepted at the import boundary, which normalizes it to v3 first.
-      // See test/plan-transfer.normalization.test.ts.
+      // See test/plan-transfer.migration.test.ts.
       expectInvalid({ ...plainPlan, version: '2' });
     });
 
