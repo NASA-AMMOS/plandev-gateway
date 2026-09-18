@@ -15,10 +15,6 @@ const v2Fixture = fixture('plan-transfer-v2');
 
 const { version: v2Version, ...versionlessFixture } = v2Fixture;
 
-/**
- * The boundary's invariant: whatever the source version, a successful parse
- * returns something the canonical schema accepts.
- */
 const parseAndAssertCanonical = (input: unknown) => {
   const result = parsePlanTransfer(input);
   validate(result);

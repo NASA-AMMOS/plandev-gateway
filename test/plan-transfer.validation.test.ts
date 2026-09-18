@@ -57,9 +57,7 @@ const withValueSchema = (schema: unknown) => ({
 const withResults = (results: unknown) => ({ ...plainPlan, model: emptyModel, results });
 
 /*
- * Structural validity only. Cases that are semantically incomplete — an unresolved
- * parent_id, a profile with no declared resource — pass on purpose; those cross-object
- * checks belong to the later semantic import validator.
+ * Structural validity only.
  */
 describe('PlanTransfer v3 schema', () => {
   describe('valid', () => {
