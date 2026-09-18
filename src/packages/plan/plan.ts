@@ -9,15 +9,14 @@ import { auth } from '../auth/middleware.js';
 import { parseJSONFile } from '../../util/fileParser.js';
 import { convertDateToDoy, getTimeDifference } from '../../util/time.js';
 import { HasuraError } from '../../types/hasura.js';
+import type { ActivityDirectiveTransfer } from '../../types/plan-transfer.js';
 import type {
-  ActivitiesJSON,
   ActivityDirective,
   ActivityDirectiveInsertInput,
   ImportPlanPayload,
   PlanInsertInput,
-  PlanSchema,
+  CreatedPlan,
   PlanTagsInsertInput,
-  PlanTransfer,
   Tag,
 } from '../../types/plan.js';
 import {
@@ -28,6 +27,7 @@ import {
   UploadPlanDatasetJSON,
   UploadPlanDatasetPayload,
 } from '../../types/dataset.js';
+import { parsePlanTransfer } from './plan-transfer.js';
 import gql from './gql.js';
 import getLogger from '../../logger.js';
 import { getEnv } from '../../env.js';
@@ -52,7 +52,7 @@ const timeColumnKey = 'time_utc';
 
 async function createActivities(
   activities: ActivityDirectiveInsertInput[],
-  activitiesJSON: ActivitiesJSON,
+  activitiesJSON: ActivityDirectiveTransfer[],
   planId: number,
   headers: Record<string, string>,
 ): Promise<number> {
@@ -115,7 +115,7 @@ async function createActivities(
 }
 
 async function createTags(
-  activities: ActivitiesJSON,
+  activities: ActivityDirectiveTransfer[],
   headers: Record<string, string>,
 ): Promise<{ createdTags: Tag[]; tagsMap: Record<string, Tag> }> {
   let createdTags: Tag[] = [];
@@ -204,7 +204,7 @@ async function createTags(
   return { createdTags, tagsMap };
 }
 
-async function remapActivities(activities: ActivitiesJSON, planId: number, tagsMap: Record<string, Tag>) {
+async function remapActivities(activities: ActivityDirectiveTransfer[], planId: number, tagsMap: Record<string, Tag>) {
   return activities.map(
     ({
       anchored_to_start: anchoredToStart,
@@ -237,7 +237,11 @@ async function remapActivities(activities: ActivitiesJSON, planId: number, tagsM
   );
 }
 
-async function remapAnchors(activities: ActivitiesJSON, activityRemap: Record<number, number>, planId: number) {
+async function remapAnchors(
+  activities: ActivityDirectiveTransfer[],
+  activityRemap: Record<number, number>,
+  planId: number,
+) {
   return activities
     .filter(({ anchor_id: anchorId }) => anchorId !== null)
     .map(({ anchor_id: anchorId, id }) => ({
@@ -265,13 +269,13 @@ async function importPlan(req: Request, res: Response) {
     'x-hasura-user-id': userHeader ? `${userHeader}` : '',
   };
 
-  let createdPlan: PlanSchema | null = null;
+  let createdPlan: CreatedPlan | null = null;
 
   let createdTags: Tag[] = [];
   let tagsMap: Record<string, Tag>;
 
   try {
-    const { activities, simulation_arguments }: PlanTransfer = await parseJSONFile<PlanTransfer>(file);
+    const { activities, simulation_arguments } = parsePlanTransfer(await parseJSONFile<unknown>(file));
 
     // create the new plan first
     logger.info(`POST /importPlan: Creating new plan: ${name}`);
@@ -322,14 +326,14 @@ async function importPlan(req: Request, res: Response) {
 
         const activityDirectivesInsertInput = await remapActivities(activities, createdPlan.id, tagsMap);
 
-        await createActivities(activityDirectivesInsertInput, activities, (createdPlan as PlanSchema).id, headers);
+        await createActivities(activityDirectivesInsertInput, activities, (createdPlan as CreatedPlan).id, headers);
 
         // associate the tags with the newly created plan
         logger.info(`POST /importPlan: Importing plan tags: ${name}`);
         const parsedTags: number[] = JSON.parse(tags);
 
         const tagsInsert: PlanTagsInsertInput[] = parsedTags.map(tagId => ({
-          plan_id: (createdPlan as PlanSchema).id,
+          plan_id: (createdPlan as CreatedPlan).id,
           tag_id: tagId,
         }));
 
@@ -408,7 +412,9 @@ async function uploadActivities(req: Request, res: Response) {
   let tagsMap: Record<string, Tag>;
 
   try {
-    const { activities: activitiesJSON }: PlanTransfer = await parseJSONFile<PlanTransfer>(file); // Activites upload is a subset of plan import
+    // Activity upload consumes only directives, so it is not part of the plan
+    // version migration; the file is read as-is, as it always has been.
+    const { activities: activitiesJSON } = await parseJSONFile<{ activities: ActivityDirectiveTransfer[] }>(file);
 
     const tagData = await createTags(activitiesJSON, headers as Record<string, string>);
     createdTags = tagData.createdTags;
