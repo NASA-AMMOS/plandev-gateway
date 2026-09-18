@@ -85,7 +85,7 @@ describe('PlanTransfer v3 schema', () => {
     });
 
     test('a plan with a model with metadata', () => {
-      expectValid({ ...plainPlan, model: { ...emptyModel, metadata: {test: "metadata"} } });
+      expectValid({ ...plainPlan, model: { ...emptyModel, metadata: { test: 'metadata' } } });
     });
 
     test('a plan with a model and results, inheriting the plan window', () => {
@@ -219,7 +219,9 @@ describe('PlanTransfer v3 schema', () => {
       expectInvalid(noVersion);
     });
 
-    test('a v2 version', () => {
+    test('v2 does not directly validate as canonical PlanTransfer v3', () => {
+      // v2 is accepted at the import boundary, which normalizes it to v3 first.
+      // See test/plan-transfer.normalization.test.ts.
       expectInvalid({ ...plainPlan, version: '2' });
     });
 

@@ -1,0 +1,69 @@
+{
+  "activities": [
+    {
+      "id": 1,
+      "anchor_id": null,
+      "anchored_to_start": true,
+      "name": "morning calibration",
+      "type": "Calibrate",
+      "start_offset": "01:00:00",
+      "arguments": {
+        "detector": "primary",
+        "cycles": 3
+      },
+      "metadata": {}
+    },
+    {
+      "id": 2,
+      "anchor_id": 1,
+      "anchored_to_start": false,
+      "name": "image crater rim",
+      "type": "TakeImage",
+      "start_offset": "00:30:00",
+      "arguments": {
+        "target": "Crater Rim A",
+        "count": 4,
+        "mode": "AUTO",
+        "compression": {
+          "algorithm": "lossless",
+          "quality": 9
+        },
+        "filters": ["IR", "VIS"]
+      },
+      "metadata": {
+        "operator_note": "repeat of orbit 108"
+      },
+      "tags": [
+        {
+          "tag": {
+            "name": "imaging",
+            "color": "#2a9d8f"
+          }
+        }
+      ]
+    }
+  ],
+  "duration": "24:00:00",
+  "id": 42,
+  "model_id": 7,
+  "name": "Orbit 112 Imaging Campaign",
+  "simulation_arguments": {
+    "initial_state_of_charge": 0.92
+  },
+  "start_time": "2030-01-01T00:00:00+00:00",
+  "tags": [
+    {
+      "tag": {
+        "name": "imaging",
+        "color": "#2a9d8f"
+      }
+    },
+    {
+      "tag": {
+        "name": "imported",
+        "color": null
+      }
+    }
+  ],
+  "version": "2"
+}

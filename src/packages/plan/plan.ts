@@ -28,13 +28,11 @@ import {
   UploadPlanDatasetJSON,
   UploadPlanDatasetPayload,
 } from '../../types/dataset.js';
+import { parsePlanTransfer } from './plan-transfer.js';
 import gql from './gql.js';
 import getLogger from '../../logger.js';
 import { getEnv } from '../../env.js';
 
-// These endpoints still accept existing (v2) files and do no v3 validation, so they
-// parse only the fields they consume rather than asserting the full v3 contract.
-type PlanImportFileContents = Pick<PlanTransfer, 'activities' | 'simulation_arguments'>;
 type ActivitiesImportFileContents = Pick<PlanTransfer, 'activities'>;
 
 const upload = multer();
@@ -276,7 +274,7 @@ async function importPlan(req: Request, res: Response) {
   let tagsMap: Record<string, Tag>;
 
   try {
-    const { activities, simulation_arguments } = await parseJSONFile<PlanImportFileContents>(file);
+    const { activities, simulation_arguments } = parsePlanTransfer(await parseJSONFile<unknown>(file));
 
     // create the new plan first
     logger.info(`POST /importPlan: Creating new plan: ${name}`);
@@ -413,7 +411,8 @@ async function uploadActivities(req: Request, res: Response) {
   let tagsMap: Record<string, Tag>;
 
   try {
-    // Activities upload is a subset of plan import
+    // Activity upload consumes only directives, so it is not part of the plan
+    // version migration; the file is read as-is, as it always has been.
     const { activities: activitiesJSON } = await parseJSONFile<ActivitiesImportFileContents>(file);
 
     const tagData = await createTags(activitiesJSON, headers as Record<string, string>);

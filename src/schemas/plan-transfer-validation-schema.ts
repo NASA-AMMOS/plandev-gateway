@@ -196,7 +196,7 @@ export const planTransferSchema = {
         },
         metadata: {
           type: 'object',
-        }
+        },
       },
       required: ['activity_types', 'resource_types'],
     },
