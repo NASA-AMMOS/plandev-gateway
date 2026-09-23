@@ -631,7 +631,7 @@ async function uploadDataset(req: Request, res: Response) {
         createdDatasetId = (addExternalDatasetResponse as AddExternalDatasetResponse).data.addExternalDataset
           ?.datasetId;
 
-        // Repeat as long as the is at least one profile with a segment left
+        // Repeat as long as there is at least one profile with a segment left
         while (profileHasSegments(profileSet)) {
           // Initialize profile payload
           let currentProfileSet: ProfileSets = initialProfileSet;
