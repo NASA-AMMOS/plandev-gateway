@@ -32,6 +32,9 @@ const plainPlan = {
   version: '3',
 };
 
+/** The ValueSchema simulation gives real (linear) resources. */
+const realSchema = { items: { initial: { type: 'real' }, rate: { type: 'real' } }, type: 'struct' };
+
 const emptyModel = { activity_types: [], resource_types: [] };
 
 const expectValid = (transfer: unknown) => {
@@ -150,6 +153,7 @@ describe('PlanTransfer v3 schema', () => {
         withResults({
           profiles: {
             '/battery/state_of_charge': {
+              schema: realSchema,
               segments: [{ dynamics: { initial: 0.92, rate: -0.00002 }, duration: 600 }, { duration: 300 }],
               type: 'real',
             },
@@ -164,6 +168,7 @@ describe('PlanTransfer v3 schema', () => {
         withResults({
           profiles: {
             '/camera/mode': {
+              schema: { type: 'string' },
               segments: [{ dynamics: 'IMAGING', duration: 600 }, { duration: 300 }, { dynamics: null, duration: 1 }],
               type: 'discrete',
             },
@@ -288,33 +293,44 @@ describe('PlanTransfer v3 schema', () => {
     test('malformed real-profile dynamics', () => {
       expectInvalid(
         withResults({
-          profiles: { '/battery/state_of_charge': { segments: [{ dynamics: 0.92, duration: 600 }], type: 'real' } },
+          profiles: {
+            '/battery/state_of_charge': {
+              schema: realSchema,
+              segments: [{ dynamics: 0.92, duration: 600 }],
+              type: 'real',
+            },
+          },
           spans: [],
         }),
       );
       expectInvalid(
         withResults({
           profiles: {
-            '/battery/state_of_charge': { segments: [{ dynamics: { initial: 0.92 }, duration: 600 }], type: 'real' },
+            '/battery/state_of_charge': {
+              schema: realSchema,
+              segments: [{ dynamics: { initial: 0.92 }, duration: 600 }],
+              type: 'real',
+            },
           },
           spans: [],
         }),
       );
     });
 
-    test('a resource profile repeating its ValueSchema', () => {
+    test('a resource profile without its ValueSchema', () => {
       expectInvalid(
-        withResults({
-          profiles: {
-            '/battery/state_of_charge': { schema: { type: 'real' }, segments: [], type: 'real' },
-          },
-          spans: [],
-        }),
+        withResults({ profiles: { '/battery/state_of_charge': { segments: [], type: 'real' } }, spans: [] }),
       );
+      expectInvalid(withResults({ profiles: { '/camera/mode': { segments: [], type: 'discrete' } }, spans: [] }));
     });
 
     test('an unknown profile type', () => {
-      expectInvalid(withResults({ profiles: { '/camera/mode': { segments: [], type: 'variant' } }, spans: [] }));
+      expectInvalid(
+        withResults({
+          profiles: { '/camera/mode': { schema: { type: 'string' }, segments: [], type: 'variant' } },
+          spans: [],
+        }),
+      );
     });
 
     test('an activity missing anchor fields', () => {

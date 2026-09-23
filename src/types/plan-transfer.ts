@@ -128,6 +128,10 @@ export type SimulatedActivitySpan = {
   parent_id?: number;
 };
 
+/**
+ * Profile types match what `addExternalDataset` accepts, what simulation writes to `merlin.profile.type`, and what the
+ * UI reads back as `profile.type` (`{ type, schema }`), so `results.profiles` is a ProfileSet as-is.
+ */
 export type RealProfileSegment = {
   /**
    * Microseconds.
@@ -135,7 +139,7 @@ export type RealProfileSegment = {
   duration: number;
 
   /**
-   * Omitted for a gap.
+   * Rate is per second. Omitted for a gap.
    */
   dynamics?: {
     initial: number;
@@ -150,18 +154,22 @@ export type DiscreteProfileSegment = {
   duration: number;
 
   /**
-   * Omitted for a gap.
+   * Omitted for a gap. `null` is a value, not a gap.
    */
   dynamics?: SerializedValue;
 };
 
+export type ProfileSegment = RealProfileSegment | DiscreteProfileSegment;
+
 /**
- * `type` determines the dynamics representation. The resource's ValueSchema is
- * declared once under `model.resource_types` and never repeated here.
+ * `schema` is the resource's ValueSchema and should equal its `model.resource_types` declaration. Simulated real
+ * resources use `{ type: 'struct', items: { initial: { type: 'real' }, rate: { type: 'real' } } }`.
  */
-export type ResourceProfile =
-  | { type: 'real'; segments: RealProfileSegment[] }
-  | { type: 'discrete'; segments: DiscreteProfileSegment[] };
+export type ProfileSet =
+  | { type: 'real'; schema: ValueSchema; segments: RealProfileSegment[] }
+  | { type: 'discrete'; schema: ValueSchema; segments: DiscreteProfileSegment[] };
+
+export type ProfileSets = Record<string, ProfileSet>;
 
 /**
  * Result timing inherits the plan window, or overrides it with both a start
@@ -169,7 +177,7 @@ export type ResourceProfile =
  */
 export type SimulationResultsTransfer = {
   spans: SimulatedActivitySpan[];
-  profiles: Record<string, ResourceProfile>;
+  profiles: ProfileSets;
 } & ({ start_time: string; duration: number } | { start_time?: never; duration?: never });
 
 export type PlanTransfer = {

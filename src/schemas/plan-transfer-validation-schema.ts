@@ -331,6 +331,9 @@ export const planTransferSchema = {
             type: {
               const: 'real',
             },
+            schema: {
+              $ref: '#/definitions/value_schema',
+            },
             segments: {
               type: 'array',
               items: {
@@ -338,7 +341,7 @@ export const planTransferSchema = {
               },
             },
           },
-          required: ['type', 'segments'],
+          required: ['type', 'schema', 'segments'],
         },
         {
           type: 'object',
@@ -347,6 +350,9 @@ export const planTransferSchema = {
             type: {
               const: 'discrete',
             },
+            schema: {
+              $ref: '#/definitions/value_schema',
+            },
             segments: {
               type: 'array',
               items: {
@@ -354,7 +360,7 @@ export const planTransferSchema = {
               },
             },
           },
-          required: ['type', 'segments'],
+          required: ['type', 'schema', 'segments'],
         },
       ],
     },

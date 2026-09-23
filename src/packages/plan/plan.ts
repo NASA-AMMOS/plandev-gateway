@@ -571,7 +571,7 @@ async function uploadDataset(req: Request, res: Response) {
                             ...previousSegments,
                             { duration, ...(value !== undefined ? { dynamics: parseFloat(value) } : {}) },
                           ],
-                        },
+                        } as ProfileSet,
                       };
                     },
                     previousPlanDataset.profileSet,
