@@ -97,6 +97,22 @@ export default {
       }
     }
   `,
+  GET_MUTATION_ROOT_FIELDS: `#graphql
+    query MutationRootFields {
+      __type(name: "mutation_root") {
+        fields {
+          name
+        }
+      }
+    }
+  `,
+  GET_PLAN_BY_NAME: `#graphql
+    query GetPlanByName($name: String!) {
+      plan(where: { name: { _eq: $name } }) {
+        id
+      }
+    }
+  `,
   GET_TAGS: `#graphql
     query GetTags {
       tags(order_by: { name: desc })  {
@@ -105,6 +121,27 @@ export default {
         id
         name
         owner
+      }
+    }
+  `,
+  MODEL_TYPE_REFRESH_STATUS: `#graphql
+    query ModelTypeRefreshStatus($modelId: Int!) {
+      mission_model_by_pk(id: $modelId) {
+        refresh_activity_type_logs(order_by: { created_at: desc }, limit: 1) {
+          pending
+          success
+          error_message
+        }
+        refresh_resource_type_logs(order_by: { created_at: desc }, limit: 1) {
+          pending
+          success
+          error_message
+        }
+        refresh_model_parameter_logs(order_by: { created_at: desc }, limit: 1) {
+          pending
+          success
+          error_message
+        }
       }
     }
   `,

@@ -113,6 +113,37 @@ export function getIntervalInMs(interval: string | null | undefined): number {
   return 0;
 }
 
+/**
+ * Converts an ISO 8601 date-time with an offset or `Z` (e.g. a plan's `start_time`) to merlin's UTC day-of-year
+ * timestamp, `YYYY-DDDTHH:MM:SS[.ffffff]`. Fractional seconds are kept to the microsecond, without passing through
+ * `Date`'s millisecond precision. A day-of-year timestamp is returned as is.
+ */
+export function isoToDoyTimestamp(dateTime: string): string {
+  if (/^\d{4}-\d{3}T/.test(dateTime)) {
+    return dateTime;
+  }
+
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})?$/.exec(dateTime);
+  const date = match ? new Date(`${match[1]}${match[3] ?? 'Z'}`) : null;
+  if (match == null || date == null || Number.isNaN(date.getTime())) {
+    throw new Error(`Invalid date-time: ${dateTime}`);
+  }
+
+  const pad = (value: number, width = 2) => `${value}`.padStart(width, '0');
+  const year = date.getUTCFullYear();
+  const dayOfYear = (Date.UTC(year, date.getUTCMonth(), date.getUTCDate()) - Date.UTC(year, 0, 1)) / 86_400_000 + 1;
+  const fraction = match[2] ? `.${match[2].slice(0, 6)}` : '';
+
+  return `${year}-${pad(dayOfYear, 3)}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(
+    date.getUTCSeconds(),
+  )}${fraction}`;
+}
+
+/** Converts a Postgres interval (e.g. a plan's `duration`) to microseconds. */
+export function intervalToMicroseconds(interval: string): number {
+  return Math.round(getIntervalInMs(interval) * 1000);
+}
+
 export function convertDateToDoy(dateString: string, numDecimals = 6): string | null {
   const parsedTime = parseDoyOrYmdTime(dateString, numDecimals);
 

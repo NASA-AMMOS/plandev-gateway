@@ -1,6 +1,6 @@
 import Ajv from 'ajv';
 import { planTransferSchema } from '../../schemas/plan-transfer-validation-schema.js';
-import type { PlanTransfer } from '../../types/plan-transfer.js';
+import type { PlanTransfer, SimulationResultsTransfer } from '../../types/plan-transfer.js';
 
 /**
  * Compatibility boundary for uploaded plan files.
@@ -87,4 +87,31 @@ export function parsePlanTransfer(input: unknown): PlanTransfer {
   }
 
   return migrated as PlanTransfer;
+}
+
+/**
+ * Rewrites `results.spans[].directive_id` from the transfer's activity ids to the ids the activities were given
+ * on import. Spans without a directive (simulated, generated, decomposed) pass through unchanged, and `span_id` /
+ * `parent_id` stay in the results' own namespace. Profiles are shared with the input, not copied.
+ */
+export function remapResultDirectiveIds(
+  results: SimulationResultsTransfer,
+  activityIdMap: Record<number, number>,
+): SimulationResultsTransfer {
+  const spans = results.spans.map(span => {
+    if (span.directive_id === undefined) {
+      return span;
+    }
+
+    const directiveId = activityIdMap[span.directive_id];
+    if (directiveId === undefined) {
+      throw new UnsupportedPlanTransferError(
+        `Result span ${span.span_id} references directive ${span.directive_id}, which is not an activity in this plan file.`,
+      );
+    }
+
+    return { ...span, directive_id: directiveId };
+  });
+
+  return { ...results, spans };
 }
