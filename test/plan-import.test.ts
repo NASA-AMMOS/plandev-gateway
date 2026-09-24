@@ -5,7 +5,6 @@ import { fileURLToPath } from 'url';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import fetch from 'node-fetch';
 import { generateJwt } from '../src/packages/auth/functions';
-import { DbMerlin } from '../src/packages/db/db';
 import { removeUploadedFile, storeUploadedFile } from '../src/packages/files/store';
 import { importPlan } from '../src/packages/plan/plan';
 import { UnsupportedPlanTransferError, remapResultDirectiveIds } from '../src/packages/plan/plan-transfer';
@@ -69,7 +68,7 @@ const defaultResponders: Record<string, Responder> = {
   GetTags: () => ({ data: { tags: [] } }),
   ModelTypeRefreshStatus: () => refreshStatus(succeeded, succeeded, succeeded),
   InsertExternalSimulationDataset: () => ({ text: '' }),
-  markPlanReadOnly: () => ({ rowCount: 1 }),
+  MarkPlanReadOnly: () => ({ text: '' }),
 };
 
 /** What Hasura's introspection shows a role that may run these mutations. */
@@ -122,12 +121,6 @@ beforeEach(() => {
   vi.mocked(removeUploadedFile).mockImplementation(async file => {
     calls.push({ operation: 'removeUploadedFile', variables: file });
   });
-  vi.spyOn(DbMerlin, 'getDb').mockReturnValue({
-    query: async (_sql: string, [planId]: [number]) => {
-      calls.push({ operation: 'markPlanReadOnly', variables: { planId } });
-      return responders.markPlanReadOnly({ planId });
-    },
-  } as any);
   vi.mocked(fetch).mockClear();
   vi.mocked(fetch).mockImplementation((async (url: unknown, init: { body: string }) => {
     if (String(url).startsWith(`${MERLIN_URL}/`)) {
@@ -238,7 +231,7 @@ describe('importPlan with an embedded model', () => {
       'UpdateActivityDirective',
       'CreatePlanTags',
       'InsertExternalSimulationDataset',
-      'markPlanReadOnly',
+      'MarkPlanReadOnly',
     ]);
 
     expect(storeUploadedFile).toHaveBeenCalledWith('plan-transfer-model.json', JSON.stringify(v3Fixture.model));
@@ -270,7 +263,7 @@ describe('importPlan with an embedded model', () => {
       simulationDuration: 86_400_000_000,
       simulationStartTime: '2030-001T00:00:00',
     });
-    expect(callsTo('markPlanReadOnly')[0].variables).toEqual({ planId: PLAN_ID });
+    expect(callsTo('MarkPlanReadOnly')[0].variables).toEqual({ planId: PLAN_ID });
     expect(vi.mocked(storeUploadedFile).mock.calls.map(([name]) => name)).toEqual(['plan-transfer-model.json']);
     expect(removeUploadedFile).not.toHaveBeenCalled();
   });
@@ -326,7 +319,7 @@ describe('importPlan with an embedded model', () => {
     expect(operations().slice(-3)).toEqual([
       'InsertExternalSimulationDataset',
       'removeUploadedFile',
-      'markPlanReadOnly',
+      'MarkPlanReadOnly',
     ]);
     expect(callsTo('removeUploadedFile').map(({ variables }) => variables)).toEqual([RESULTS_FILE]);
   });
@@ -403,15 +396,15 @@ describe('importPlan with an embedded model', () => {
     expect(removeUploadedFile).toHaveBeenCalledWith(RESULTS_FILE);
     expect(callsTo('DeletePlan')[0].variables).toEqual({ id: PLAN_ID });
     expect(callsTo('DeleteTags')[0].variables).toEqual({ tagIds: [FIRST_TAG_ID] });
-    expect(callsTo('markPlanReadOnly')).toHaveLength(0);
+    expect(callsTo('MarkPlanReadOnly')).toHaveLength(0);
   });
 
   test('a plan that cannot be made read-only is rolled back', async () => {
-    responders.markPlanReadOnly = () => ({ rowCount: 0 });
+    responders.MarkPlanReadOnly = () => merlinError('plan cannot be marked read only');
 
     const { error } = await runImport(v3Fixture);
 
-    expect(error).toBe(`Could not mark plan ${PLAN_ID} read-only: no such plan.`);
+    expect(error).toBe('plan cannot be marked read only');
     expect(callsTo('DeletePlan')[0].variables).toEqual({ id: PLAN_ID });
   });
 
@@ -426,7 +419,7 @@ describe('importPlan with an embedded model', () => {
 });
 
 describe('importPlan calling merlin directly', () => {
-  test('creates the model and inserts the results through merlin, not Hasura', async () => {
+  test('creates the model, inserts the results and marks the plan read-only through merlin, not Hasura', async () => {
     const { error } = await runImport(v3Fixture);
 
     expect(error).toBeUndefined();
@@ -434,7 +427,11 @@ describe('importPlan calling merlin directly', () => {
       .mocked(fetch)
       .mock.calls.map(([url]) => String(url))
       .filter(url => url.startsWith(MERLIN_URL));
-    expect(merlinUrls).toEqual([`${MERLIN_URL}/insertModel`, `${MERLIN_URL}/insertExternalSimulationDataset`]);
+    expect(merlinUrls).toEqual([
+      `${MERLIN_URL}/insertModel`,
+      `${MERLIN_URL}/insertExternalSimulationDataset`,
+      `${MERLIN_URL}/markPlanReadOnly`,
+    ]);
   });
 
   test("takes the model's owner from the token, not the request's x-hasura-user-id header", async () => {
@@ -491,7 +488,7 @@ describe('importPlan waiting for model types', () => {
     expect(operations().slice(-3)).toEqual([
       'InsertExternalSimulationDataset',
       'removeUploadedFile',
-      'markPlanReadOnly',
+      'MarkPlanReadOnly',
     ]);
   });
 

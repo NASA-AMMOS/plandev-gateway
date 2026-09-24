@@ -2,7 +2,6 @@ import fetch from 'node-fetch';
 import type { HasuraError } from '../../types/hasura.js';
 import type { ModelDeclaration, SerializedValue, SimulationResultsTransfer } from '../../types/plan-transfer.js';
 import { getSessionVariables } from '../auth/functions.js';
-import { DbMerlin } from '../db/db.js';
 import { removeUploadedFile, storeUploadedFile } from '../files/store.js';
 import { getEnv } from '../../env.js';
 import { intervalToMicroseconds, isoToDoyTimestamp } from '../../util/time.js';
@@ -11,9 +10,10 @@ import gql from './gql.js';
 /**
  * Backend calls for importing a self-contained PlanTransfer as a non-executable, read-only plan.
  *
- * Merlin owns the non-executable model and its types, and the imported simulation dataset; the gateway stages files,
- * says who the caller is, and marks the plan read-only once it has finished writing to it. How each payload reaches
- * merlin is kept inside these helpers so it can change without touching `/importPlan`.
+ * Merlin owns the non-executable model and its types, the imported simulation dataset, and the plan's read-only flag;
+ * the gateway stages files, says who the caller is, and asks for the plan to be made read-only once it has finished
+ * writing to it. How each payload reaches merlin is kept inside these helpers so it can change without touching
+ * `/importPlan`.
  */
 
 const { HASURA_API_URL, PLANDEV_MERLIN_URL } = getEnv();
@@ -168,7 +168,7 @@ export async function waitForModelTypes(
 /**
  * Has merlin store `results` (if any) as a successful simulation dataset for the plan.
  *
- * Spans and profiles are too large for merlin's request body limit (1 MB), so they are staged as a file merlin reads
+ * Spans and profiles are staged as a file merlin reads
  * from the shared file store, and removed once merlin is done with them. The simulation's window and arguments go in
  * the call itself, so merlin has them before reading the file: timestamps in merlin's UTC day-of-year format, the
  * duration in microseconds.
@@ -215,15 +215,9 @@ export async function insertExternalSimulationDataset({
 }
 
 /**
- * Marks the imported plan read-only, directly in the database, once the gateway has finished writing to it: from
- * then on the database refuses changes to its activities, simulation and bounds, the gateway's included.
+ * Has merlin mark the imported plan read-only, once the gateway has finished writing to it: from then on the database
+ * refuses changes to its activities, simulation and bounds, the gateway's included.
  */
 export async function markPlanReadOnly(planId: number): Promise<void> {
-  const { rowCount } = await DbMerlin.getDb().query('update merlin.plan set is_read_only = true where id = $1;', [
-    planId,
-  ]);
-
-  if (!rowCount) {
-    throw new Error(`Could not mark plan ${planId} read-only: no such plan.`);
-  }
+  await postMerlin('markPlanReadOnly', { planId });
 }
