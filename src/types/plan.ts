@@ -1,6 +1,6 @@
 import type { UserId } from './auth';
 
-export type PlanSchema = {
+export type CreatedPlan = {
   created_at: string;
   duration: string;
   id: number;
@@ -14,7 +14,7 @@ export type PlanSchema = {
   updated_by: UserId;
 };
 
-export type PlanInsertInput = Pick<PlanSchema, 'duration' | 'model_id' | 'name' | 'start_time'>;
+export type PlanInsertInput = Pick<CreatedPlan, 'duration' | 'model_id' | 'name' | 'start_time'>;
 
 export type PlanTagsInsertInput = {
   plan_id: number;
@@ -76,17 +76,3 @@ export type ActivityDirectiveInsertInput = {
   type: string;
 };
 export type ActivityDirectiveSetInput = Pick<ActivityDirectiveInsertInput, 'anchor_id'>;
-
-export type ActivitiesJSON = Pick<
-  ActivityDirective,
-  'anchor_id' | 'anchored_to_start' | 'arguments' | 'id' | 'metadata' | 'name' | 'start_offset' | 'tags' | 'type'
->[];
-
-export type PlanTransfer = Pick<PlanSchema, 'id' | 'duration' | 'model_id' | 'name' | 'start_time'> & {
-  activities: ActivitiesJSON;
-  end_time: string;
-  simulation_arguments: ArgumentsMap;
-  tags?: {
-    tag: TagsInsertInput;
-  }[];
-};
