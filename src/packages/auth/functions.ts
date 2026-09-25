@@ -130,6 +130,31 @@ export function decodeJwt(authorizationHeader: string | undefined): JwtDecode {
   }
 }
 
+/**
+ * The Hasura session variables for a request, taken from its verified JWT the way Hasura would: the user from the
+ * token, and the requested role (or the token's default) only if the token allows it. For calls that bypass Hasura,
+ * where the request's own `x-hasura-*` headers cannot be trusted.
+ */
+export function getSessionVariables(
+  authorizationHeader: string | undefined,
+  requestedRole: string | undefined,
+): { 'x-hasura-role': string; 'x-hasura-user-id': string } {
+  const { jwtErrorMessage, jwtPayload } = decodeJwt(authorizationHeader);
+  if (jwtPayload == null) {
+    throw new Error(`Unauthorized: ${jwtErrorMessage}`);
+  }
+
+  const claims = jwtPayload['https://hasura.io/jwt/claims'];
+  const allowedRoles = claims['x-hasura-allowed-roles'] as string[];
+  const role = requestedRole || (claims['x-hasura-default-role'] as string);
+
+  if (!allowedRoles.includes(role)) {
+    throw new Error(`Role "${role}" is not in the allowed roles.`);
+  }
+
+  return { 'x-hasura-role': role, 'x-hasura-user-id': claims['x-hasura-user-id'] as string };
+}
+
 export function generateJwt(
   username: string,
   defaultRole: string,

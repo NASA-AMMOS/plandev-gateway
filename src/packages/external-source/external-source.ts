@@ -569,5 +569,5 @@ export default (app: Express) => {
    *     tags:
    *       - Hasura
    */
-  app.post('/uploadExternalSource', upload.single('external_source_file'), refreshLimiter, auth, uploadExternalSource);
+  app.post('/uploadExternalSource', refreshLimiter, auth, upload.single('external_source_file'), uploadExternalSource);
 };
