@@ -148,6 +148,22 @@ describe('PlanTransfer v3 schema', () => {
       );
     });
 
+    // computed attributes are a single SerializedValue, so any JSON value
+    test.each([
+      ['a number', 42],
+      ['a string', 'IMG-0001'],
+      ['an array', ['a']],
+      ['a boolean', true],
+      ['null', null],
+    ])('computed attributes as %s', (_, computed_attributes) => {
+      expectValid(
+        withResults({
+          profiles: {},
+          spans: [{ arguments: {}, computed_attributes, span_id: 1, start_offset: 0, type: 'TakeImage' }],
+        }),
+      );
+    });
+
     test('a real resource profile, including a gap segment', () => {
       expectValid(
         withResults({
@@ -247,24 +263,6 @@ describe('PlanTransfer v3 schema', () => {
 
     test('a result duration without a start_time', () => {
       expectInvalid(withResults({ duration: 21600000000, profiles: {}, spans: [] }));
-    });
-
-    test('primitive computed_attributes', () => {
-      expectInvalid(
-        withResults({
-          profiles: {},
-          spans: [{ arguments: {}, computed_attributes: 42, span_id: 1, start_offset: 0, type: 'TakeImage' }],
-        }),
-      );
-    });
-
-    test('array computed_attributes', () => {
-      expectInvalid(
-        withResults({
-          profiles: {},
-          spans: [{ arguments: {}, computed_attributes: ['a'], span_id: 1, start_offset: 0, type: 'TakeImage' }],
-        }),
-      );
     });
 
     test('required_parameters without parameters', () => {
