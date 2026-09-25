@@ -86,13 +86,83 @@ export function parsePlanTransfer(input: unknown): PlanTransfer {
     throw new UnsupportedPlanTransferError(`Plan file is not a valid PlanTransfer v3: ${details.join('; ')}`);
   }
 
-  return migrated as PlanTransfer;
+  const transfer = migrated as PlanTransfer;
+  assertSpansConsistent(transfer);
+
+  return transfer;
+}
+
+/**
+ * Checks the rules between `results.spans` that the schema cannot express, so a bad file fails before anything is
+ * created:
+ *   - `span_id`s are unique, and each directive has at most one span
+ *   - a span with a `directive_id` is a root: it references an activity in this file and has no `parent_id`
+ *   - every `parent_id` chain ends at a root, without dangling references or loops
+ * A span with neither (e.g. one spawned by model code) is a root that no directive owns.
+ */
+function assertSpansConsistent({ activities, results }: PlanTransfer): void {
+  if (results === undefined) {
+    return;
+  }
+
+  const activityIds = new Set(activities.map(({ id }) => id));
+  const parentOf = new Map<number, number | undefined>();
+  const spanOfDirective = new Map<number, number>();
+
+  for (const { directive_id, parent_id, span_id } of results.spans) {
+    if (parentOf.has(span_id)) {
+      throw new UnsupportedPlanTransferError(`Result span id ${span_id} is used more than once.`);
+    }
+    parentOf.set(span_id, parent_id);
+
+    if (directive_id === undefined) {
+      continue;
+    }
+    if (parent_id !== undefined) {
+      throw new UnsupportedPlanTransferError(
+        `Result span ${span_id} has both a directive_id and a parent_id; a directive's span must be a root.`,
+      );
+    }
+    if (!activityIds.has(directive_id)) {
+      throw new UnsupportedPlanTransferError(
+        `Result span ${span_id} references directive ${directive_id}, which is not an activity in this plan file.`,
+      );
+    }
+    const otherSpan = spanOfDirective.get(directive_id);
+    if (otherSpan !== undefined) {
+      throw new UnsupportedPlanTransferError(
+        `Result spans ${otherSpan} and ${span_id} both reference directive ${directive_id}.`,
+      );
+    }
+    spanOfDirective.set(directive_id, span_id);
+  }
+
+  // Each chain is walked once: spans already known to reach a root end the walk early.
+  const reachesRoot = new Set<number>();
+  for (const start of parentOf.keys()) {
+    const chain = new Set<number>();
+    for (let id: number | undefined = start; id !== undefined && !reachesRoot.has(id); id = parentOf.get(id)) {
+      if (!parentOf.has(id)) {
+        throw new UnsupportedPlanTransferError(
+          `A result span's parent_id references span ${id}, which is not in the results.`,
+        );
+      }
+      if (chain.has(id)) {
+        throw new UnsupportedPlanTransferError(`Result span ${id}'s parent_id chain loops back on itself.`);
+      }
+      chain.add(id);
+    }
+    chain.forEach(id => reachesRoot.add(id));
+  }
 }
 
 /**
  * Rewrites `results.spans[].directive_id` from the transfer's activity ids to the ids the activities were given
  * on import. Spans without a directive (simulated, generated, decomposed) pass through unchanged, and `span_id` /
  * `parent_id` stay in the results' own namespace. Profiles are shared with the input, not copied.
+ *
+ * `parsePlanTransfer` has already checked every `directive_id` is an activity in the file; the check here only
+ * guards against an incomplete `activityIdMap`.
  */
 export function remapResultDirectiveIds(
   results: SimulationResultsTransfer,

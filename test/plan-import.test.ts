@@ -384,15 +384,15 @@ describe('importPlan with an embedded model', () => {
     expect(removeUploadedFile).toHaveBeenCalledWith(MODEL_FILE);
   });
 
-  test('a span referencing an unknown directive fails and deletes the plan', async () => {
+  test('a span referencing an unknown directive fails before anything is created', async () => {
     const transfer = structuredClone(v3Fixture);
     transfer.results!.spans[0].directive_id = 99;
 
     const { error } = await runImport(transfer);
 
     expect(error).toBe('Result span 1 references directive 99, which is not an activity in this plan file.');
-    expect(callsTo('InsertExternalSimulationDataset')).toHaveLength(0);
-    expect(callsTo('DeletePlan')[0].variables).toEqual({ id: PLAN_ID });
+    expect(storeUploadedFile).not.toHaveBeenCalled();
+    expect(operations()).toEqual([]);
   });
 
   test('a failed results ingestion deletes the plan and the tags the import created', async () => {

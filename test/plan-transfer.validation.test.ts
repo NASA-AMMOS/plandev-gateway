@@ -2,6 +2,7 @@ import Ajv from 'ajv';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { describe, expect, test } from 'vitest';
+import { parsePlanTransfer } from '../src/packages/plan/plan-transfer';
 import { planTransferSchema } from '../src/schemas/plan-transfer-validation-schema';
 
 const ajv = Ajv();
@@ -346,5 +347,71 @@ describe('PlanTransfer v3 schema', () => {
         }),
       );
     });
+  });
+});
+
+/*
+ * Rules between spans, which the schema cannot express; checked by parsePlanTransfer.
+ */
+describe('PlanTransfer span rules', () => {
+  const span = (span_id: number, fields: { directive_id?: number; parent_id?: number } = {}) => ({
+    arguments: {},
+    span_id,
+    start_offset: 0,
+    type: 'TakeImage',
+    ...fields,
+  });
+  const withSpans = (...spans: unknown[]) => withResults({ profiles: {}, spans });
+
+  test('accepts a directive span with children, and a root no directive owns', () => {
+    const transfer = withSpans(
+      span(1, { directive_id: 1 }),
+      span(2, { parent_id: 1 }),
+      span(3, { parent_id: 2 }),
+      span(4),
+      span(5, { parent_id: 4 }),
+    );
+
+    expect(() => parsePlanTransfer(transfer)).not.toThrow();
+  });
+
+  test('accepts a child listed before its parent', () => {
+    expect(() => parsePlanTransfer(withSpans(span(2, { parent_id: 1 }), span(1)))).not.toThrow();
+  });
+
+  test.each([
+    ['a duplicate span_id', [span(1), span(1)], 'Result span id 1 is used more than once.'],
+    [
+      'a directive that is not an activity',
+      [span(1, { directive_id: 99 })],
+      'Result span 1 references directive 99, which is not an activity in this plan file.',
+    ],
+    [
+      'two spans for one directive',
+      [span(1, { directive_id: 1 }), span(2, { directive_id: 1 })],
+      'Result spans 1 and 2 both reference directive 1.',
+    ],
+    [
+      'a directive span with a parent',
+      [span(1), span(2, { directive_id: 1, parent_id: 1 })],
+      "Result span 2 has both a directive_id and a parent_id; a directive's span must be a root.",
+    ],
+    [
+      'a parent that is not a span',
+      [span(1, { parent_id: 7 })],
+      "A result span's parent_id references span 7, which is not in the results.",
+    ],
+    [
+      'a span that is its own parent',
+      [span(1, { parent_id: 1 })],
+      "Result span 1's parent_id chain loops back on itself.",
+    ],
+    [
+      'a parent_id loop',
+      [span(1, { parent_id: 3 }), span(2, { parent_id: 1 }), span(3, { parent_id: 2 })],
+      "Result span 1's parent_id chain loops back on itself.",
+    ],
+  ])('refuses %s', (_, spans, message) => {
+    expect(() => parsePlanTransfer(withSpans(...spans))).toThrow(message);
   });
 });
