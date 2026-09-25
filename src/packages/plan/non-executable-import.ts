@@ -1,7 +1,7 @@
 import fetch from 'node-fetch';
 import type { HasuraError } from '../../types/hasura.js';
 import type { ModelDeclaration, SerializedValue, SimulationResultsTransfer } from '../../types/plan-transfer.js';
-import { getSessionVariables } from '../auth/functions.js';
+import { generateJwt, getSessionVariables } from '../auth/functions.js';
 import { removeUploadedFile, storeUploadedFile } from '../files/store.js';
 import { getEnv } from '../../env.js';
 import { intervalToMicroseconds, isoToDoyTimestamp } from '../../util/time.js';
@@ -10,10 +10,10 @@ import gql from './gql.js';
 /**
  * Backend calls for importing a self-contained PlanTransfer as a non-executable, read-only plan.
  *
- * Merlin owns the non-executable model and its types, the imported simulation dataset, and the plan's read-only flag;
- * the gateway stages files, says who the caller is, and asks for the plan to be made read-only once it has finished
- * writing to it. How each payload reaches merlin is kept inside these helpers so it can change without touching
- * `/importPlan`.
+ * The gateway creates the non-executable model's row through Hasura, whose event triggers then have merlin register
+ * its types. Merlin owns the imported simulation dataset and the plan's read-only flag; the gateway stages files, says
+ * who the caller is, and asks for the plan to be made read-only once it has finished writing to it. How each payload
+ * reaches the backend is kept inside these helpers so it can change without touching `/importPlan`.
  */
 
 const { HASURA_API_URL, PLANDEV_MERLIN_URL } = getEnv();
@@ -68,11 +68,12 @@ async function postMerlin(endpoint: string, body: Record<string, unknown>): Prom
 }
 
 /**
- * Stages the model declaration as a JSON definition file and has merlin create a non-executable model from it,
- * owned by the caller. Its types are registered asynchronously afterwards; see `waitForModelTypes`.
+ * Stages the model declaration as a JSON definition file and inserts a non-executable model for it, owned by the
+ * caller. Its types are registered asynchronously afterwards; see `waitForModelTypes`.
  *
- * The owner comes from the caller's verified token, not the request's `x-hasura-user-id` header, since no Hasura
- * sits in between to check it.
+ * Only admins may insert models through Hasura, so the insert uses a short-lived admin token. The caller must already
+ * be known to be allowed to create plans, and since the admin role skips Hasura's column presets, the owner comes from
+ * the caller's verified token rather than the request's `x-hasura-user-id` header.
  */
 export async function createNonExecutableModel(
   model: ModelDeclaration,
@@ -80,21 +81,46 @@ export async function createNonExecutableModel(
   headers: Record<string, string>,
 ): Promise<number> {
   // resolved first, so a bad token fails before anything is staged
-  const { 'x-hasura-user-id': requester } = getSessionVariables(headers.Authorization, headers['x-hasura-role']);
+  const { 'x-hasura-user-id': owner } = getSessionVariables(headers.Authorization, headers['x-hasura-role']);
+  const adminToken = generateJwt(owner, 'admin', ['admin'], '10s');
+  if (adminToken === null) {
+    throw new Error('Could not create a token to insert the non-executable model.');
+  }
+
   const definitionFile = await storeUploadedFile('plan-transfer-model.json', JSON.stringify(model));
 
   try {
-    // merlin replies with the new model's id as plain text
-    const reply = await postMerlin('insertModel', { modelName: name, requester, uploadedFileId: definitionFile.id });
-    if (!/^\d+$/.test(reply.trim())) {
+    const { insert_mission_model_one: inserted } = await postGraphQL<{
+      insert_mission_model_one: { id: number } | null;
+    }>(
+      gql.INSERT_NON_EXECUTABLE_MODEL,
+      {
+        definition_file_id: definitionFile.id,
+        description: describeNonExecutableModel(model, name),
+        mission: typeof model.metadata?.mission === 'string' ? model.metadata.mission : '',
+        name,
+        owner,
+        // unique for the (mission, name, version) key, and tells the user when it was imported
+        version: new Date().toISOString(),
+      },
+      { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json', 'x-hasura-role': 'admin' },
+    );
+    if (inserted == null) {
       throw new Error('Non-executable model creation returned no model id.');
     }
 
-    return Number(reply);
+    return inserted.id;
   } catch (error) {
     await removeUploadedFile(definitionFile);
     throw error;
   }
+}
+
+function describeNonExecutableModel({ activity_types, resource_types }: ModelDeclaration, planName: string): string {
+  return (
+    `Non-executable model imported with the plan "${planName}". It declares ${activity_types.length} activity ` +
+    `type(s) and ${resource_types.length} resource type(s) and cannot be simulated.`
+  );
 }
 
 const MODEL_TYPE_REFRESH_POLL_MS = 250;

@@ -124,6 +124,27 @@ export default {
       }
     }
   `,
+  INSERT_NON_EXECUTABLE_MODEL: `#graphql
+    mutation InsertNonExecutableModel(
+      $definition_file_id: Int!,
+      $owner: String!,
+      $name: String!,
+      $mission: String!,
+      $version: String!,
+      $description: String!) {
+        insert_mission_model_one(object: {
+          definition_file_id: $definition_file_id,
+          description: $description,
+          mission: $mission,
+          name: $name,
+          version: $version,
+          owner: $owner,
+          is_executable: false
+        }) {
+          id
+        }
+    }
+  `,
   MODEL_TYPE_REFRESH_STATUS: `#graphql
     query ModelTypeRefreshStatus($modelId: Int!) {
       mission_model_by_pk(id: $modelId) {

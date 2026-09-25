@@ -4,7 +4,7 @@ import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import fetch from 'node-fetch';
-import { generateJwt } from '../src/packages/auth/functions';
+import { decodeJwt, generateJwt } from '../src/packages/auth/functions';
 import { removeUploadedFile, storeUploadedFile } from '../src/packages/files/store';
 import { importPlan } from '../src/packages/plan/plan';
 import { UnsupportedPlanTransferError, remapResultDirectiveIds } from '../src/packages/plan/plan-transfer';
@@ -33,7 +33,7 @@ const PLAN_ID = 50;
 const FIRST_DIRECTIVE_ID = 581;
 const FIRST_TAG_ID = 300;
 
-type Call = { operation: string; variables: any };
+type Call = { headers?: Record<string, string>; operation: string; variables: any };
 type RefreshLog = { error_message: string | null; pending: boolean; success: boolean };
 type Responder = (variables: any) => unknown;
 
@@ -56,7 +56,6 @@ const defaultResponders: Record<string, Responder> = {
       },
     },
   }),
-  InsertModel: () => ({ text: `${MODEL_ID}` }),
   CreatePlan: ({ plan }) => ({ data: { createPlan: { ...plan, id: PLAN_ID } } }),
   CreateTags: ({ tags }) => ({
     data: {
@@ -66,6 +65,7 @@ const defaultResponders: Record<string, Responder> = {
   GetPlanByName: () => ({ data: { plan: [] } }),
   MutationRootFields: () => mutationRoot('insert_activity_directive', 'insert_plan_one', 'insert_tags'),
   GetTags: () => ({ data: { tags: [] } }),
+  InsertNonExecutableModel: () => ({ data: { insert_mission_model_one: { id: MODEL_ID } } }),
   ModelTypeRefreshStatus: () => refreshStatus(succeeded, succeeded, succeeded),
   InsertExternalSimulationDataset: () => ({ text: '' }),
   MarkPlanReadOnly: () => ({ text: '' }),
@@ -122,10 +122,13 @@ beforeEach(() => {
     calls.push({ operation: 'removeUploadedFile', variables: file });
   });
   vi.mocked(fetch).mockClear();
-  vi.mocked(fetch).mockImplementation((async (url: unknown, init: { body: string }) => {
+  vi.mocked(fetch).mockImplementation((async (
+    url: unknown,
+    init: { body: string; headers: Record<string, string> },
+  ) => {
     if (String(url).startsWith(`${MERLIN_URL}/`)) {
       const endpoint = String(url).slice(MERLIN_URL.length + 1);
-      // labelled like the GraphQL operations, e.g. insertModel -> InsertModel
+      // labelled like the GraphQL operations, e.g. markPlanReadOnly -> MarkPlanReadOnly
       const operation = endpoint[0].toUpperCase() + endpoint.slice(1);
       const body = JSON.parse(init.body);
       calls.push({ operation, variables: body });
@@ -135,7 +138,7 @@ beforeEach(() => {
 
     const { query, variables } = JSON.parse(init.body);
     const operation = /(?:query|mutation)\s+(\w+)/.exec(query)?.[1] ?? 'unknown';
-    calls.push({ operation, variables });
+    calls.push({ headers: init.headers, operation, variables });
     const body = responders[operation]?.(variables) ?? { data: {} };
     return { json: async () => body, status: 200 };
   }) as any);
@@ -221,7 +224,7 @@ describe('importPlan with an embedded model', () => {
     expect(operations()).toEqual([
       'MutationRootFields',
       'GetPlanByName',
-      'InsertModel',
+      'InsertNonExecutableModel',
       'ModelTypeRefreshStatus',
       'CreatePlan',
       'InitialSimulationUpdate',
@@ -235,10 +238,15 @@ describe('importPlan with an embedded model', () => {
     ]);
 
     expect(storeUploadedFile).toHaveBeenCalledWith('plan-transfer-model.json', JSON.stringify(v3Fixture.model));
-    expect(callsTo('InsertModel')[0].variables).toEqual({
-      modelName: form.name,
-      requester: 'importer',
-      uploadedFileId: MODEL_FILE.id,
+    expect(callsTo('InsertNonExecutableModel')[0].variables).toEqual({
+      definition_file_id: MODEL_FILE.id,
+      description:
+        'Non-executable model imported with the plan "Imported plan". It declares 3 activity type(s) and 2 resource ' +
+        'type(s) and cannot be simulated.',
+      mission: '',
+      name: form.name,
+      owner: 'importer',
+      version: expect.any(String),
     });
 
     // the file supplies the window and simulation arguments; the form supplies only the name and plan tags
@@ -367,7 +375,7 @@ describe('importPlan with an embedded model', () => {
   });
 
   test('a failed model creation creates no plan and discards the staged definition', async () => {
-    responders.InsertModel = () => merlinError('model declaration rejected');
+    responders.InsertNonExecutableModel = () => ({ errors: [{ message: 'model declaration rejected' }] });
 
     const { error } = await runImport(v3Fixture);
 
@@ -408,8 +416,8 @@ describe('importPlan with an embedded model', () => {
     expect(callsTo('DeletePlan')[0].variables).toEqual({ id: PLAN_ID });
   });
 
-  test('a merlin reply that is not a model id fails the import', async () => {
-    responders.InsertModel = () => ({ text: '' });
+  test('a model insert that returns no model fails the import', async () => {
+    responders.InsertNonExecutableModel = () => ({ data: { insert_mission_model_one: null } });
 
     const { error } = await runImport(v3Fixture);
 
@@ -418,8 +426,8 @@ describe('importPlan with an embedded model', () => {
   });
 });
 
-describe('importPlan calling merlin directly', () => {
-  test('creates the model, inserts the results and marks the plan read-only through merlin, not Hasura', async () => {
+describe('importPlan calling the backend', () => {
+  test('inserts the results and marks the plan read-only through merlin, not Hasura', async () => {
     const { error } = await runImport(v3Fixture);
 
     expect(error).toBeUndefined();
@@ -427,24 +435,39 @@ describe('importPlan calling merlin directly', () => {
       .mocked(fetch)
       .mock.calls.map(([url]) => String(url))
       .filter(url => url.startsWith(MERLIN_URL));
-    expect(merlinUrls).toEqual([
-      `${MERLIN_URL}/insertModel`,
-      `${MERLIN_URL}/insertExternalSimulationDataset`,
-      `${MERLIN_URL}/markPlanReadOnly`,
-    ]);
+    expect(merlinUrls).toEqual([`${MERLIN_URL}/insertExternalSimulationDataset`, `${MERLIN_URL}/markPlanReadOnly`]);
+  });
+
+  test("inserts the model with a short-lived admin token for the caller, not the caller's own token", async () => {
+    await runImport(v3Fixture);
+
+    const { headers } = callsTo('InsertNonExecutableModel')[0];
+    expect(headers?.['x-hasura-role']).toBe('admin');
+    expect(headers?.Authorization).not.toBe(`Bearer ${token}`);
+
+    const { jwtPayload } = decodeJwt(headers?.Authorization);
+    expect(jwtPayload?.['https://hasura.io/jwt/claims']).toEqual({
+      'x-hasura-allowed-roles': ['admin'],
+      'x-hasura-default-role': 'admin',
+      'x-hasura-user-id': 'importer',
+    });
+    expect(jwtPayload!.exp! - jwtPayload!.iat!).toBe(10);
+
+    // everything else still runs as the caller
+    expect(callsTo('CreatePlan')[0].headers?.Authorization).toBe(`Bearer ${token}`);
   });
 
   test("takes the model's owner from the token, not the request's x-hasura-user-id header", async () => {
     await runImport(v3Fixture, form, { 'x-hasura-role': 'user', 'x-hasura-user-id': 'someone-else' });
 
-    expect(callsTo('InsertModel')[0].variables).toMatchObject({ requester: 'importer' });
+    expect(callsTo('InsertNonExecutableModel')[0].variables).toMatchObject({ owner: 'importer' });
   });
 
   test("accepts the token's default role when the request names none", async () => {
     const { error } = await runImport(v3Fixture, form, {});
 
     expect(error).toBeUndefined();
-    expect(callsTo('InsertModel')[0].variables).toMatchObject({ requester: 'importer' });
+    expect(callsTo('InsertNonExecutableModel')[0].variables).toMatchObject({ owner: 'importer' });
   });
 
   test('refuses a role the token does not allow, before staging or creating anything', async () => {
@@ -452,7 +475,7 @@ describe('importPlan calling merlin directly', () => {
 
     expect(error).toBe('Role "aerie_admin" is not in the allowed roles.');
     expect(storeUploadedFile).not.toHaveBeenCalled();
-    expect(callsTo('InsertModel')).toHaveLength(0);
+    expect(callsTo('InsertNonExecutableModel')).toHaveLength(0);
     expect(callsTo('CreatePlan')).toHaveLength(0);
   });
 });
