@@ -24,6 +24,17 @@ describe('Time utility function tests', () => {
       year: 2019,
     });
 
+    expect(parseDoyOrYmdTime('2019-10-31T08:10:03.9')).toEqual({
+      day: 31,
+      hour: 8,
+      min: 10,
+      month: 10,
+      ms: 900,
+      sec: 3,
+      time: '08:10:03.9',
+      year: 2019,
+    });
+
     expect(parseDoyOrYmdTime('2022-01-2T00:00:00')).toEqual({
       day: 2,
       hour: 0,
