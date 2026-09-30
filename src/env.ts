@@ -1,5 +1,17 @@
-import type { Algorithm } from 'jsonwebtoken';
 import { GroupRoleMapping } from './types/auth';
+import { StringValue } from 'ms';
+
+/**
+ * JWT claim path configuration.
+ * Allows customization of where user ID, roles, and other claims are read from in the JWT.
+ * Defaults follow Hasura's JWT claims namespace convention.
+ */
+export type JwtClaimsConfig = {
+  namespace: string;
+  userId: string;
+  allowedRoles: string;
+  defaultRole: string;
+};
 
 export type Env = {
   ALLOWED_ROLES: string[];
@@ -15,8 +27,8 @@ export type Env = {
   GQL_API_WS_URL: string;
   HASURA_API_URL: string;
   HASURA_GRAPHQL_JWT_SECRET: string;
-  JWT_ALGORITHMS: Algorithm[];
-  JWT_EXPIRATION: string;
+  JWT_CLAIMS: JwtClaimsConfig;
+  JWT_EXPIRATION: StringValue;
   LOG_FILE: string;
   LOG_LEVEL: string;
   PORT: string;
@@ -28,6 +40,13 @@ export type Env = {
   RATE_LIMITER_FILES_MAX: number;
   RATE_LIMITER_LOGIN_MAX: number;
   VERSION: string;
+};
+
+export const defaultJwtClaims: JwtClaimsConfig = {
+  namespace: 'https://hasura.io/jwt/claims',
+  userId: 'x-hasura-user-id',
+  allowedRoles: 'x-hasura-allowed-roles',
+  defaultRole: 'x-hasura-default-role',
 };
 
 export const defaultEnv: Env = {
@@ -46,8 +65,8 @@ export const defaultEnv: Env = {
   GQL_API_WS_URL: 'ws://localhost:8080/v1/graphql',
   HASURA_API_URL: 'http://hasura:8080',
   HASURA_GRAPHQL_JWT_SECRET: '',
-  JWT_ALGORITHMS: ['HS256'],
-  JWT_EXPIRATION: '36h',
+  JWT_CLAIMS: defaultJwtClaims,
+  JWT_EXPIRATION: '36h' as StringValue,
   LOG_FILE: 'console',
   LOG_LEVEL: 'info',
   PLANDEV_DB: 'plandev',
@@ -121,8 +140,13 @@ export function getEnv(): Env {
   const GQL_API_WS_URL = env['GQL_API_WS_URL'] ?? defaultEnv.GQL_API_WS_URL;
   const HASURA_GRAPHQL_JWT_SECRET = env['HASURA_GRAPHQL_JWT_SECRET'] ?? defaultEnv.HASURA_GRAPHQL_JWT_SECRET;
   const HASURA_API_URL = env['HASURA_API_URL'] ?? defaultEnv.HASURA_API_URL;
-  const JWT_ALGORITHMS = parseArray(env['JWT_ALGORITHMS'], defaultEnv.JWT_ALGORITHMS);
-  const JWT_EXPIRATION = env['JWT_EXPIRATION'] ?? defaultEnv.JWT_EXPIRATION;
+  const JWT_CLAIMS: JwtClaimsConfig = {
+    namespace: env['JWT_CLAIMS_NAMESPACE'] ?? defaultJwtClaims.namespace,
+    userId: env['JWT_CLAIMS_USER_ID'] ?? defaultJwtClaims.userId,
+    allowedRoles: env['JWT_CLAIMS_ALLOWED_ROLES'] ?? defaultJwtClaims.allowedRoles,
+    defaultRole: env['JWT_CLAIMS_DEFAULT_ROLE'] ?? defaultJwtClaims.defaultRole,
+  };
+  const JWT_EXPIRATION = (env['JWT_EXPIRATION'] as StringValue) ?? defaultEnv.JWT_EXPIRATION;
   const LOG_FILE = env['LOG_FILE'] ?? defaultEnv.LOG_FILE;
   const LOG_LEVEL = env['LOG_LEVEL'] ?? defaultEnv.LOG_LEVEL;
   const PORT = env['PORT'] ?? defaultEnv.PORT;
@@ -151,7 +175,7 @@ export function getEnv(): Env {
     GQL_API_WS_URL,
     HASURA_API_URL,
     HASURA_GRAPHQL_JWT_SECRET,
-    JWT_ALGORITHMS,
+    JWT_CLAIMS,
     JWT_EXPIRATION,
     LOG_FILE,
     LOG_LEVEL,

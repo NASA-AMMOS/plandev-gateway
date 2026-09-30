@@ -1,4 +1,4 @@
-import jwt, { Algorithm } from 'jsonwebtoken';
+import jwt, { Algorithm, JwtHeader, VerifyOptions } from 'jsonwebtoken';
 import type { Response } from 'node-fetch';
 import fetch from 'node-fetch';
 import { getEnv } from '../../env.js';
@@ -14,6 +14,8 @@ import type {
   UserRoles,
 } from '../../types/auth.js';
 import { loginSSO } from './adapters/CAMAuthAdapter.js';
+import { JwksClient } from 'jwks-rsa';
+import { StringValue } from 'ms';
 
 const logger = getLogger('packages/auth/functions');
 
@@ -107,14 +109,92 @@ export async function syncRolesToDB(username: string, default_role: string, allo
   await db.query('commit;');
 }
 
-export function decodeJwt(authorizationHeader: string | undefined): JwtDecode {
+function enforcePEMFormatting(publicKey: string): string {
+  if (publicKey.includes('-----BEGIN PUBLIC KEY-----') && publicKey.includes('-----END PUBLIC KEY-----')) {
+    return publicKey;
+  }
+  else {
+    return '-----BEGIN PUBLIC KEY-----\n' + publicKey + '\n-----END PUBLIC KEY-----'
+  }
+}
+
+export async function decodeJwt(authorizationHeader: string | undefined): Promise<JwtDecode> {
   try {
     const token = authorizationHeaderToToken(authorizationHeader);
-    const { HASURA_GRAPHQL_JWT_SECRET, JWT_ALGORITHMS } = getEnv();
-    const { key }: JwtSecret = JSON.parse(HASURA_GRAPHQL_JWT_SECRET);
-    const options: jwt.VerifyOptions = { algorithms: JWT_ALGORITHMS };
-    const jwtPayload = jwt.verify(token, key, options) as JwtPayload;
-    return { jwtErrorMessage: '', jwtPayload };
+    const { HASURA_GRAPHQL_JWT_SECRET } = getEnv();
+    const { type, key, jwk_url, issuer, audience }: JwtSecret = JSON.parse(HASURA_GRAPHQL_JWT_SECRET);
+
+    // Bind the accepted algorithm to the secret's declared `type` (the same value generateJwt signs
+    // with), rather than a global JWT_ALGORITHMS default. This keeps HS256 and RS256/JWKS
+    // deployments self-configuring from their own secret — no reliance on a process-wide default
+    // that can only be correct for one mode — and, critically, prevents an RS256->HS256
+    // algorithm-confusion forgery: a JWKS/RS256 verifier never accepts an HS256 token signed with
+    // the (public) RSA key. `alg: none` is excluded for the same reason.
+    const options: jwt.VerifyOptions = { algorithms: [type as Algorithm] };
+
+    // Add issuer/audience validation if configured (used with JWKS/OIDC)
+    if (issuer) {
+      options.issuer = issuer;
+    }
+    if (audience) {
+      // jwt.verify expects string or non-empty array
+      options.audience = Array.isArray(audience) ? audience as [string, ...string[]] : audience;
+    }
+
+    type getKeyType = (header: JwtHeader, callback: any) => void;
+    let realKey: string | getKeyType;
+
+    // if they are using a jwk_url instead, pull the key!
+    if (!key && jwk_url) {
+      // https://www.npmjs.com/package/jsonwebtoken
+      const client = new JwksClient({
+        jwksUri: jwk_url
+      });
+
+      realKey = function(header, callback) {
+        client.getSigningKey(header.kid, function(err, key) {
+          if (err) {
+            callback(err, null);
+          } else if (key) {
+            const signingKey = key.getPublicKey();
+            callback(null, signingKey);
+          } else {
+            callback(new Error('No signing key found'), null);
+          }
+        });
+      }
+
+      const verifyJwt = async function(token: string, options: VerifyOptions = {}): Promise<any> {
+        return new Promise((resolve, reject) => {
+          jwt.verify(token, realKey, options, (err, decoded) => {
+            if (err) return reject(err);
+            resolve(decoded);
+          });
+        });
+      }
+
+      try {
+        const jwtPayload = await verifyJwt(token, options);
+        return {jwtErrorMessage: '', jwtPayload: jwtPayload}
+      } catch (err) {
+        return {jwtErrorMessage: 'JWT verification failed: ' + err, jwtPayload: null}
+      }
+    }
+    else if (key) {
+      if (type === "RS256") {
+        realKey = enforcePEMFormatting(key);
+      }
+      else {
+        realKey = key;
+      }
+
+      const jwtPayload = jwt.verify(token, realKey, options) as JwtPayload;
+      return { jwtErrorMessage: '', jwtPayload };
+    }
+    else {
+      const jwtErrorMessage = 'Neither a valid JWT Key or JWK URL were provided. A type (algorithm) and either of those two must be provided.'
+      return { jwtErrorMessage, jwtPayload: null };
+    }
   } catch (e) {
     console.error(e);
 
@@ -134,22 +214,26 @@ export function generateJwt(
   username: string,
   defaultRole: string,
   allowedRoles: string[],
-  expiry: string = getEnv().JWT_EXPIRATION,
+  expiry: StringValue = getEnv().JWT_EXPIRATION,
 ): string | null {
   try {
-    const { HASURA_GRAPHQL_JWT_SECRET } = getEnv();
+    const { HASURA_GRAPHQL_JWT_SECRET, JWT_CLAIMS } = getEnv();
     const { key, type }: JwtSecret = JSON.parse(HASURA_GRAPHQL_JWT_SECRET);
-    const options: jwt.SignOptions = { algorithm: type as Algorithm, expiresIn: expiry };
-    const payload: JwtPayload = {
-      'https://hasura.io/jwt/claims': {
-        'x-hasura-allowed-roles': allowedRoles,
-        'x-hasura-default-role': defaultRole,
-        'x-hasura-user-id': username,
-      },
-      username,
-    };
+    if (key) {
+      const options: jwt.SignOptions = { algorithm: type as Algorithm, expiresIn: expiry };
+      const payload: JwtPayload = {
+        [JWT_CLAIMS.namespace]: {
+          [JWT_CLAIMS.allowedRoles]: allowedRoles,
+          [JWT_CLAIMS.defaultRole]: defaultRole,
+          [JWT_CLAIMS.userId]: username,
+        },
+        username,
+      };
 
-    return jwt.sign(payload, key, options);
+      return jwt.sign(payload, key, options);
+    }
+    console.error('using JWKS URL, so this JWT generation will not work. You also shouldn\'t be using this method if using JWKS')
+    return null;
   } catch (e) {
     console.error(e);
     return null;
@@ -210,9 +294,32 @@ export async function login(username: string, password: string): Promise<AuthRes
 }
 
 export async function session(authorizationHeader: string | undefined): Promise<SessionResponse> {
-  const { jwtErrorMessage, jwtPayload } = decodeJwt(authorizationHeader);
+  const { jwtErrorMessage, jwtPayload } = await decodeJwt(authorizationHeader);
 
   if (jwtPayload) {
+    // Lazy-upsert the user's permissions row on first sight.
+    //
+    // For gateway-issued JWTs (JWT/SSO modes), login() already provisioned the row,
+    // so the SELECT inside getUserRoles is a no-op for existing users. For
+    // Keycloak-issued OIDC tokens this is the *only* place provisioning happens —
+    // the UI's user-scoped JWT lacks Hasura insert permission on permissions.users.
+    //
+    // Failure here must not block session validation (token is still valid even if
+    // the DB write hiccups); log and continue.
+    try {
+      const { JWT_CLAIMS } = getEnv();
+      const namespace = (jwtPayload as Record<string, unknown>)[JWT_CLAIMS.namespace] as
+        | Record<string, unknown>
+        | undefined;
+      const username = namespace?.[JWT_CLAIMS.userId];
+      const default_role = namespace?.[JWT_CLAIMS.defaultRole];
+      const allowed_roles = namespace?.[JWT_CLAIMS.allowedRoles];
+      if (typeof username === 'string' && typeof default_role === 'string' && Array.isArray(allowed_roles)) {
+        await getUserRoles(username, default_role, allowed_roles as string[]);
+      }
+    } catch (err) {
+      console.error('User provisioning during session validation failed:', err);
+    }
     return { message: 'Token is valid', success: true };
   } else {
     return { message: jwtErrorMessage, success: false };
