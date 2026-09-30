@@ -90,6 +90,13 @@ export default {
       }
     }
   `,
+  DOWNLOAD_SIMULATION_DATASET: `#graphql
+    query DownloadSimulationDataset($planId: Int!, $simulationDatasetId: Int!) {
+      downloadSimulationDataset(planId: $planId, simulationDatasetId: $simulationDatasetId) {
+        simulationResults
+      }
+    }
+  `,
   EXTEND_EXTERNAL_DATASET: `#graphql
     mutation ExtendExternalDataset($datasetId: Int!, $profileSet: ProfileSet!) {
       extendExternalDataset(datasetId: $datasetId, profileSet: $profileSet) {
@@ -123,6 +130,13 @@ export default {
         returning {
           id
         }
+      }
+    }
+  `,
+  UPLOAD_SIMULATION_DATASET: `#graphql
+    mutation UploadSimulationDataset($planId: Int!, $simulationResults: SimulationResultsInput!) {
+      uploadSimulationDataset(planId: $planId, simulationResults: $simulationResults) {
+        simulationDatasetId
       }
     }
   `,

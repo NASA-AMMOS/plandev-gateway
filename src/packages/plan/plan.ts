@@ -9,6 +9,7 @@ import { auth } from '../auth/middleware.js';
 import { parseJSONFile } from '../../util/fileParser.js';
 import { convertDateToDoy, getTimeDifference } from '../../util/time.js';
 import { HasuraError } from '../../types/hasura.js';
+import { BadRequestError, isServerError } from '../../types/errors.js';
 import type {
   ActivitiesJSON,
   ActivityDirective,
@@ -24,6 +25,7 @@ import {
   ProfileSegment,
   ProfileSet,
   ProfileSets,
+  SimulationDatasetJSON,
   UploadActivitiesPayload,
   UploadPlanDatasetJSON,
   UploadPlanDatasetPayload,
@@ -49,6 +51,17 @@ const refreshLimiter = rateLimit({
 });
 
 const timeColumnKey = 'time_utc';
+
+function buildHeaders(req: Request): Record<string, string> {
+  const authorizationHeader = req.get('authorization');
+  const { 'x-hasura-role': roleHeader, 'x-hasura-user-id': userHeader } = req.headers;
+  return {
+    Authorization: authorizationHeader ?? '',
+    'Content-Type': 'application/json',
+    'x-hasura-role': roleHeader ? `${roleHeader}` : '',
+    'x-hasura-user-id': userHeader ? `${userHeader}` : '',
+  };
+}
 
 async function createActivities(
   activities: ActivityDirectiveInsertInput[],
@@ -707,6 +720,105 @@ async function uploadDataset(req: Request, res: Response) {
   }
 }
 
+async function uploadSimulationDataset(req: Request, res: Response) {
+  const { body, file } = req;
+  const { plan_id: planIdString } = body as { plan_id: string };
+  const headers = buildHeaders(req);
+
+  try {
+    const planId: number = parseInt(planIdString);
+    if (isNaN(planId)) {
+      throw new BadRequestError('plan_id is required and must be an integer');
+    }
+    const simulationResults = await parseJSONFile<SimulationDatasetJSON>(file);
+
+    logger.info(`POST /uploadSimulationDataset: Uploading simulation dataset for plan ${planId}`);
+
+    const response = await fetch(GQL_API_URL, {
+      body: JSON.stringify({
+        query: gql.UPLOAD_SIMULATION_DATASET,
+        variables: { planId, simulationResults },
+      }),
+      headers,
+      method: 'POST',
+    });
+
+    type UploadResponse = { data: { uploadSimulationDataset: { simulationDatasetId: number } | null } };
+    const jsonResponse = (await response.json()) as UploadResponse | HasuraError;
+
+    if ((jsonResponse as UploadResponse).data?.uploadSimulationDataset != null) {
+      const { simulationDatasetId } = (jsonResponse as UploadResponse).data.uploadSimulationDataset!;
+      logger.info(`POST /uploadSimulationDataset: Created simulation dataset ID=${simulationDatasetId}`);
+      res.json(simulationDatasetId);
+    } else if ((jsonResponse as HasuraError).errors) {
+      throw new Error(JSON.stringify((jsonResponse as HasuraError).errors));
+    } else {
+      throw new Error('Simulation dataset upload unsuccessful.');
+    }
+  } catch (error) {
+    logger.error(`POST /uploadSimulationDataset: Error occurred during simulation dataset upload`);
+    logger.error(error);
+    const status = isServerError(error) ? error.statusCode : 500;
+    res.status(status).send((error as Error).message);
+  }
+}
+
+async function downloadSimulationDataset(req: Request, res: Response) {
+  const { plan_id: planIdString, simulation_dataset_id: datasetIdString } = req.query as {
+    plan_id: string;
+    simulation_dataset_id: string;
+  };
+  const headers = buildHeaders(req);
+
+  try {
+    const planId = parseInt(planIdString);
+    const simulationDatasetId = parseInt(datasetIdString);
+
+    if (isNaN(planId) || isNaN(simulationDatasetId)) {
+      throw new BadRequestError('plan_id and simulation_dataset_id query parameters are required and must be integers');
+    }
+
+    logger.info(
+      `GET /downloadSimulationDataset: Downloading simulation dataset ${simulationDatasetId} for plan ${planId}`,
+    );
+
+    const response = await fetch(GQL_API_URL, {
+      body: JSON.stringify({
+        query: gql.DOWNLOAD_SIMULATION_DATASET,
+        variables: { planId, simulationDatasetId },
+      }),
+      headers,
+      method: 'POST',
+    });
+
+    type DownloadResponse = { data: { downloadSimulationDataset: { simulationResults: object } | null } };
+    const jsonResponse = (await response.json()) as DownloadResponse | HasuraError;
+
+    if ((jsonResponse as DownloadResponse).data?.downloadSimulationDataset != null) {
+      const { simulationResults } = (jsonResponse as DownloadResponse).data.downloadSimulationDataset!;
+      logger.info(
+        `GET /downloadSimulationDataset: Successfully retrieved simulation dataset ${simulationDatasetId}`,
+      );
+
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="simulation_dataset_${simulationDatasetId}.json"`,
+      );
+      res.status(200).send(JSON.stringify(simulationResults));
+    } else if ((jsonResponse as HasuraError).errors) {
+      throw new Error(JSON.stringify((jsonResponse as HasuraError).errors));
+    } else {
+      throw new Error('Simulation dataset download unsuccessful.');
+    }
+  } catch (error) {
+    logger.error(`GET /downloadSimulationDataset: Error occurred during simulation dataset download`);
+    logger.error(error);
+    const status = isServerError(error) ? error.statusCode : 500;
+    res.status(status).send((error as Error).message);
+  }
+}
+
 export default (app: Express) => {
   /**
    * @swagger
@@ -799,6 +911,75 @@ export default (app: Express) => {
    *       - Hasura
    */
   app.post('/uploadDataset', upload.single('external_dataset'), refreshLimiter, auth, uploadDataset);
+
+  /**
+   * @swagger
+   * /uploadSimulationDataset:
+   *   post:
+   *     security:
+   *       - bearerAuth: []
+   *     consumes:
+   *       - multipart/form-data
+   *     produces:
+   *       - application/json
+   *     requestBody:
+   *       content:
+   *         multipart/form-data:
+   *          schema:
+   *            type: object
+   *            properties:
+   *              plan_id:
+   *                type: integer
+   *              simulation_results_file:
+   *                format: binary
+   *                type: string
+   *     responses:
+   *       200:
+   *         description: The ID of the created simulation dataset
+   *     summary: Upload a simulation results JSON file to a plan
+   *     tags:
+   *       - Hasura
+   */
+  app.post('/uploadSimulationDataset', upload.single('simulation_results_file'), refreshLimiter, auth, uploadSimulationDataset);
+
+  /**
+   * @swagger
+   * /downloadSimulationDataset:
+   *   get:
+   *     security:
+   *       - bearerAuth: []
+   *     produces:
+   *       - application/json
+   *     parameters:
+   *      - in: header
+   *        name: x-hasura-role
+   *        schema:
+   *          type: string
+   *          required: false
+   *      - in: query
+   *        name: plan_id
+   *        schema:
+   *          type: integer
+   *        required: true
+   *      - in: query
+   *        name: simulation_dataset_id
+   *        schema:
+   *          type: integer
+   *        required: true
+   *     responses:
+   *       200:
+   *         description: The simulation results JSON file
+   *       400:
+   *         description: Missing or invalid query parameters
+   *       403:
+   *         description: Unauthorized error
+   *       401:
+   *         description: Unauthenticated error
+   *     summary: Download a simulation dataset as a JSON file
+   *     tags:
+   *       - Hasura
+   */
+  app.get('/downloadSimulationDataset', refreshLimiter, auth, downloadSimulationDataset);
 
   /**
    * @swagger
