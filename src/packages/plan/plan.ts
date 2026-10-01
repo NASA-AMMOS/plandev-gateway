@@ -93,6 +93,10 @@ async function createActivities(
 
   logger.info(`POST /uploadActivities: Re-assigning anchors`);
   const updates = await remapAnchors(activitiesJSON, activityRemap, planId);
+  // Hasura answers an empty `updates` with a single object rather than an array
+  if (updates.length === 0) {
+    return activityRemap;
+  }
   const { update_activity_directive_many: updated } = await postGraphQL<{
     update_activity_directive_many: { affected_rows: number }[];
   }>(gql.UPDATE_ACTIVITY_DIRECTIVES, { updates }, resolveHeaders(headers));

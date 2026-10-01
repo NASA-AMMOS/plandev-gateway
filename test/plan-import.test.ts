@@ -41,6 +41,10 @@ const v2Fixture = fixture('plan-transfer-v2');
 const v3Fixture: PlanTransfer = fixture('plan-transfer-v3');
 const { model: _model, results: _results, ...v3PlanOnly } = v3Fixture;
 const { results: _omitted, ...v3PlanAndModel } = v3Fixture;
+const v2Unanchored = {
+  ...v2Fixture,
+  activities: v2Fixture.activities.map((activity: object) => ({ ...activity, anchor_id: null })),
+};
 
 const MODEL = { definitionFile: { id: 42, name: 'model.json' }, id: 900, owner: 'importer' };
 const PLAN_ID = 50;
@@ -68,8 +72,9 @@ const defaultResponders: typeof responders = {
   GetTags: () => ({ tags: [] }),
   InitialSimulationUpdate: () => ({ update_simulation: { returning: [{ id: 1 }] } }),
   MutationRootFields: () => ({ __type: { fields: [{ name: 'insert_plan_one' }] } }),
+  // like Hasura, an empty `updates` gets a single object rather than an array
   UpdateActivityDirective: ({ updates }) => ({
-    update_activity_directive_many: updates.map(() => ({ affected_rows: 1 })),
+    update_activity_directive_many: updates.length ? updates.map(() => ({ affected_rows: 1 })) : { affected_rows: 0 },
   }),
 };
 
@@ -138,6 +143,7 @@ async function runImport(
 describe('importPlan succeeding', () => {
   test.each([
     ['v2', v2Fixture],
+    ['v2 without anchors', v2Unanchored],
     ['v3 plan-only', v3PlanOnly],
   ])('%s imports onto the requested model', async (_, transfer) => {
     const { body, status } = await runImport(transfer);
