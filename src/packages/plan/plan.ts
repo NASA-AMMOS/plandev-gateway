@@ -33,6 +33,7 @@ import {
 import { parsePlanTransfer, remapResultDirectiveIds } from './plan-transfer.js';
 import {
   type CreatedNonExecutableModel,
+  PlanImportRequestFailedError,
   adminHeaders,
   backgroundHeaders,
   createNonExecutableModel,
@@ -504,8 +505,11 @@ async function finishImport(
     logger.error(`POST /importPlan: Import request ${requestId} failed`);
     logger.error(error);
 
-    // recorded before the rollback, which clears the request's plan and model
-    await setPlanImportRequestStatus(requestId, 'failed', { message: (error as Error).message }).catch(statusError =>
+    // recorded before the rollback, which clears the request's plan and model; merlin's own reason is kept whole
+    const reason = (error instanceof PlanImportRequestFailedError && error.reason) || {
+      message: (error as Error).message,
+    };
+    await setPlanImportRequestStatus(requestId, 'failed', reason).catch(statusError =>
       logger.error(`POST /importPlan: Could not mark import request ${requestId} failed: ${statusError}`),
     );
     await rollBackImport(created);

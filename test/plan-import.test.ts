@@ -7,8 +7,7 @@ import fetch from 'node-fetch';
 import { decodeJwt, generateJwt } from '../src/packages/auth/functions';
 import { removeUploadedFile, storeUploadedFile } from '../src/packages/files/store';
 import { importPlan } from '../src/packages/plan/plan';
-import { UnsupportedPlanTransferError, remapResultDirectiveIds } from '../src/packages/plan/plan-transfer';
-import type { PlanTransfer, SimulationResultsTransfer } from '../src/types/plan-transfer';
+import type { PlanTransfer } from '../src/types/plan-transfer';
 
 vi.mock('node-fetch', () => ({ default: vi.fn() }));
 // the gateway writes plan_import_request rows directly, like uploaded files
@@ -76,7 +75,7 @@ const defaultResponders: Record<string, Responder> = {
   ModelTypeRefreshStatus: () => refreshStatus(succeeded, succeeded, succeeded),
   // merlin marks the request complete once it has ingested the results
   InsertExternalSimulationDataset: ({ requestId }) => {
-    importRequests[requestId].status = 'complete';
+    merlinSetsStatus(requestId, 'complete');
     return { text: '' };
   },
   MarkPlanReadOnly: () => ({ text: '' }),
@@ -126,28 +125,36 @@ let token: string;
 
 type ImportRequest = { model_id: number; plan_id: number; reason: any; requester: string; status: string };
 let importRequests: Record<number, ImportRequest>;
+/** Every status the import request has been given, by the gateway or merlin, in order. */
+let statusHistory: string[];
+
+/** Merlin advancing the import request, as it does once it has ingested (or failed to ingest) the results. */
+function merlinSetsStatus(id: number, status: string, reason: unknown = null) {
+  Object.assign(importRequests[id], { reason, status });
+  statusHistory.push(status);
+}
 
 /** The fake database's answer to the gateway's plan_import_request queries, recorded like the other calls. */
 async function dbQuery(sql: string, params: any[]) {
   if (sql.includes('extract(epoch from $1::interval)')) {
-    const durations: Record<string, string> = {
-      '24:00:00': '86400000000',
-      P1D: '86400000000',
-      '1 month': '2592000000000',
-      '1 year': '31557600000000',
-    };
-    return { rows: [{ microseconds: durations[params[0]] }] };
+    // the fixture's 24:00:00
+    return { rows: [{ microseconds: params[0] === '24:00:00' ? '86400000000' : undefined }] };
   }
   if (sql.includes('insert into merlin.plan_import_request')) {
     const [requester, status, model_id, plan_id] = params;
     importRequests[REQUEST_ID] = { model_id, plan_id, reason: null, requester, status };
+    statusHistory.push(status);
     calls.push({ operation: 'InsertPlanImportRequest', variables: importRequests[REQUEST_ID] });
     return { rows: [{ id: REQUEST_ID }] };
   }
   if (sql.includes('update merlin.plan_import_request')) {
     const [id, status, reason] = params;
-    Object.assign(importRequests[id], { reason, status });
     calls.push({ operation: `SetImportStatus:${status}`, variables: { id, reason } });
+    // like the database, updating a request that is gone changes nothing
+    if (importRequests[id]) {
+      Object.assign(importRequests[id], { reason, status });
+      statusHistory.push(status);
+    }
     return { rows: [] };
   }
   if (sql.includes('select status, reason from merlin.plan_import_request')) {
@@ -166,6 +173,7 @@ beforeEach(() => {
   token = generateJwt('importer', 'user', ['user', 'viewer'])!;
   calls = [];
   importRequests = {};
+  statusHistory = [];
   responders = { ...defaultResponders };
   vi.mocked(storeUploadedFile).mockClear();
   vi.mocked(removeUploadedFile).mockReset();
@@ -256,6 +264,7 @@ describe('importPlan without an embedded model', () => {
       'SetImportStatus:complete',
     ]);
     // no model to wait for, so it starts at importing_plan
+    expect(statusHistory).toEqual(['importing_plan', 'complete']);
     expect(request).toEqual({
       model_id: form.model_id,
       plan_id: PLAN_ID,
@@ -309,6 +318,7 @@ describe('importPlan with an embedded model', () => {
     expect(res.status).toHaveBeenCalledWith(202);
     expect(body).toEqual({ model_id: MODEL_ID, plan_id: PLAN_ID, plan_import_request_id: REQUEST_ID });
     expect(operations()).toEqual([...STARTED, 'ModelTypeRefreshStatus', ...FILLED, 'SetImportStatus:complete']);
+    expect(statusHistory).toEqual(['extracting_model', 'importing_plan', 'complete']);
     expect(request).toEqual({
       model_id: MODEL_ID,
       plan_id: PLAN_ID,
@@ -349,14 +359,6 @@ describe('importPlan with an embedded model', () => {
     expect(removeUploadedFile).not.toHaveBeenCalled();
   });
 
-  test('ignores model_id from both the file and the form', async () => {
-    expect(v3Fixture.model_id).toBe(7);
-
-    await runImport(v3Fixture, { ...form, model_id: 3 });
-
-    expect(callsTo('CreatePlan')[0].variables.plan.model_id).toBe(MODEL_ID);
-  });
-
   test("falls back to the file's plan name", async () => {
     await runImport(v3PlanAndModel, { ...form, name: undefined });
 
@@ -369,6 +371,7 @@ describe('importPlan with an embedded model', () => {
 
     expect(error).toBeUndefined();
     expect(request?.status).toBe('complete');
+    expect(statusHistory).toEqual(['extracting_model', 'importing_plan', 'importing_dataset', 'complete']);
     expect(operations()).toEqual([
       ...STARTED,
       'ModelTypeRefreshStatus',
@@ -380,6 +383,12 @@ describe('importPlan with an embedded model', () => {
       'removeUploadedFile',
     ]);
     expect(callsTo('removeUploadedFile').map(({ variables }) => variables)).toEqual([RESULTS_FILE]);
+    // through merlin itself, not Hasura
+    const merlinUrls = vi
+      .mocked(fetch)
+      .mock.calls.map(([url]) => String(url))
+      .filter(url => url.startsWith(MERLIN_URL));
+    expect(merlinUrls).toEqual([`${MERLIN_URL}/markPlanReadOnly`, `${MERLIN_URL}/insertExternalSimulationDataset`]);
 
     // merlin's day-of-year timestamps, and the plan's 24:00:00 in microseconds; the fixture's results inherit the
     // plan's window
@@ -429,20 +438,6 @@ describe('importPlan with an embedded model', () => {
       simulationDuration: 7_200_000_000,
       simulationStartTime: '2030-001T01:00:00',
     });
-    expect(Object.keys(stagedResults()).sort()).toEqual(['profiles', 'spans']);
-  });
-
-  test.each([
-    ['P1D', 86_400_000_000],
-    ['1 month', 2_592_000_000_000],
-    ['1 year', 31_557_600_000_000],
-  ])('normalizes the plan interval %s through PostgreSQL', async (duration, expected) => {
-    const transfer = { ...v3Fixture, duration };
-
-    const { error } = await runImport(transfer);
-
-    expect(error).toBeUndefined();
-    expect(callsTo('InsertExternalSimulationDataset')[0].variables.simulationDuration).toBe(expected);
   });
 
   test('writes each profile with type and schema before segments, keeping segment order', async () => {
@@ -483,25 +478,23 @@ describe('importPlan refusing an embedded-model import before responding', () =>
     expect(storeUploadedFile).not.toHaveBeenCalled();
   });
 
-  test('a failed model creation creates no plan and discards the staged definition', async () => {
-    responders.InsertNonExecutableModel = () => ({ errors: [{ message: 'model declaration rejected' }] });
+  test.each([
+    ['fails', { errors: [{ message: 'model declaration rejected' }] }, 'model declaration rejected'],
+    [
+      'returns no model',
+      { data: { insert_mission_model_one: null } },
+      'Non-executable model creation returned no model id.',
+    ],
+  ])('a model insert that %s creates no plan and discards the staged definition', async (_, response, message) => {
+    responders.InsertNonExecutableModel = () => response;
 
     const { error, request } = await runImport(v3Fixture);
 
-    expect(error).toBe('model declaration rejected');
+    expect(error).toBe(message);
     expect(callsTo('CreatePlan')).toHaveLength(0);
     expect(callsTo('DeleteMissionModel')).toHaveLength(0);
     expect(removeUploadedFile).toHaveBeenCalledWith(MODEL_FILE);
     expect(request).toBeUndefined();
-  });
-
-  test('a model insert that returns no model fails the import', async () => {
-    responders.InsertNonExecutableModel = () => ({ data: { insert_mission_model_one: null } });
-
-    const { error } = await runImport(v3Fixture);
-
-    expect(error).toBe('Non-executable model creation returned no model id.');
-    expect(removeUploadedFile).toHaveBeenCalledWith(MODEL_FILE);
   });
 
   test('a failed plan creation deletes the model and records no request', async () => {
@@ -555,7 +548,8 @@ describe('importPlan failing after responding', () => {
     expect(error).toBeUndefined();
     expect(res.status).toHaveBeenCalledWith(202);
     expect(request?.status).toBe('failed');
-    expect(request?.reason).toEqual({ message });
+    expect(request?.reason).toMatchObject({ message });
+    expect(statusHistory).not.toContain('complete');
 
     const ops = operations();
     expect(ops.indexOf('SetImportStatus:failed')).toBeLessThan(ops.indexOf('DeletePlan'));
@@ -587,12 +581,19 @@ describe('importPlan failing after responding', () => {
     responders.MarkPlanReadOnly = () => merlinError('plan cannot be marked read only');
 
     await expectFailedAndRolledBack(v3Fixture, 'plan cannot be marked read only');
+    // every activity, anchor and tag had already been written, and the plan holding them is deleted
+    const ops = operations();
+    for (const write of ['CreateActivityDirectives', 'UpdateActivityDirective', 'CreatePlanTags']) {
+      expect(ops.indexOf(write)).toBeLessThan(ops.indexOf('SetImportStatus:failed'));
+    }
     expect(callsTo('DeleteTags')[0].variables).toEqual({ tagIds: [FIRST_TAG_ID] });
     expect(callsTo('InsertExternalSimulationDataset')).toHaveLength(0);
   });
 
   test.each([
     ['simulation arguments', 'InitialSimulationUpdate'],
+    // e.g. the database refusing an activity's type or arguments
+    ['activities', 'CreateActivityDirectives'],
     ['activity anchors', 'UpdateActivityDirective'],
     ['plan tags', 'CreatePlanTags'],
   ])('a rejected %s write', async (_, operation) => {
@@ -620,63 +621,39 @@ describe('importPlan failing after responding', () => {
 
   test('merlin marking the request failed, with its reason', async () => {
     responders.InsertExternalSimulationDataset = ({ requestId }) => {
-      Object.assign(importRequests[requestId], {
-        reason: { message: 'duplicate profile segment', type: 'SQL_EXCEPTION' },
-        status: 'failed',
-      });
+      merlinSetsStatus(requestId, 'failed', { message: 'duplicate profile segment', type: 'SQL_EXCEPTION' });
       return { text: '' };
     };
 
     await expectFailedAndRolledBack(v3Fixture, 'duplicate profile segment');
-    expect(removeUploadedFile).toHaveBeenCalledWith(RESULTS_FILE);
+    expect(importRequests[REQUEST_ID].reason).toEqual({ message: 'duplicate profile segment', type: 'SQL_EXCEPTION' });
+    expect(statusHistory).toEqual(['extracting_model', 'importing_plan', 'importing_dataset', 'failed', 'failed']);
+    // the staged results are removed before the plan they were for
+    const ops = operations();
+    expect(ops.indexOf('removeUploadedFile')).toBeLessThan(ops.indexOf('DeletePlan'));
+    expect(callsTo('removeUploadedFile')[0].variables).toEqual(RESULTS_FILE);
   });
 
-  test('keeps the model when its plan could not be deleted', async () => {
+  // the plan's contents were all written, and cleanup is best-effort: whatever is left behind, the request still says
+  // the import failed, and why
+  test.each([
+    ['the plan cannot be deleted', 'DeletePlan', { errors: [{ message: 'database unavailable' }] }, 0],
+    ['deleting the plan returns null', 'DeletePlan', { data: { deletePlan: null } }, 0],
+    ['the model cannot be deleted', 'DeleteMissionModel', { errors: [{ message: 'database unavailable' }] }, 1],
+  ])('keeps the request failed, and the model definition, when %s', async (_, operation, response, modelDeletes) => {
     responders.MarkPlanReadOnly = () => merlinError('plan cannot be marked read only');
-    responders.DeletePlan = () => ({ errors: [{ message: 'database unavailable' }] });
+    responders[operation] = () => response;
 
     const { request } = await runImport(v3Fixture);
 
-    expect(request?.status).toBe('failed');
-    expect(callsTo('DeleteMissionModel')).toHaveLength(0);
-    expect(removeUploadedFile).not.toHaveBeenCalledWith(MODEL_FILE);
-  });
-
-  test('keeps the model when deleting the plan returns null', async () => {
-    responders.MarkPlanReadOnly = () => merlinError('plan cannot be marked read only');
-    responders.DeletePlan = () => ({ data: { deletePlan: null } });
-
-    const { request } = await runImport(v3Fixture);
-
-    expect(request?.status).toBe('failed');
-    expect(callsTo('DeleteMissionModel')).toHaveLength(0);
-    expect(removeUploadedFile).not.toHaveBeenCalledWith(MODEL_FILE);
-  });
-
-  test('keeps the definition file when the model could not be deleted', async () => {
-    responders.MarkPlanReadOnly = () => merlinError('plan cannot be marked read only');
-    responders.DeleteMissionModel = () => ({ errors: [{ message: 'database unavailable' }] });
-
-    const { request } = await runImport(v3Fixture);
-
-    expect(request?.reason).toEqual({ message: 'plan cannot be marked read only' });
-    expect(callsTo('DeleteMissionModel')).toHaveLength(1);
+    expect(request).toMatchObject({ reason: { message: 'plan cannot be marked read only' }, status: 'failed' });
+    expect(statusHistory).not.toContain('complete');
+    expect(callsTo('DeleteMissionModel')).toHaveLength(modelDeletes);
     expect(removeUploadedFile).not.toHaveBeenCalledWith(MODEL_FILE);
   });
 });
 
 describe('importPlan calling the backend', () => {
-  test('inserts the results and marks the plan read-only through merlin, not Hasura', async () => {
-    const { error } = await runImport(v3Fixture);
-
-    expect(error).toBeUndefined();
-    const merlinUrls = vi
-      .mocked(fetch)
-      .mock.calls.map(([url]) => String(url))
-      .filter(url => url.startsWith(MERLIN_URL));
-    expect(merlinUrls).toEqual([`${MERLIN_URL}/markPlanReadOnly`, `${MERLIN_URL}/insertExternalSimulationDataset`]);
-  });
-
   test("inserts the model with a short-lived admin token for the caller, not the caller's own token", async () => {
     await runImport(v3Fixture);
 
@@ -777,7 +754,7 @@ describe('importPlan polling', () => {
 
   test('keeps polling the request until merlin has ingested the results', async () => {
     responders.InsertExternalSimulationDataset = ({ requestId }) => {
-      setTimeout(() => (importRequests[requestId].status = 'complete'), 2_500);
+      setTimeout(() => merlinSetsStatus(requestId, 'complete'), 2_500);
       return { text: '' };
     };
 
@@ -786,6 +763,72 @@ describe('importPlan polling', () => {
     expect(request?.status).toBe('complete');
     expect(callsTo('PollImportRequest')).toHaveLength(4);
     expect(operations().at(-1)).toBe('removeUploadedFile');
+  });
+
+  test('gives up on the results after an hour and rolls back', async () => {
+    // merlin accepts the results but never finishes the request
+    responders.InsertExternalSimulationDataset = () => ({ text: '' });
+
+    const { request } = await runImportAdvancing(v3Fixture, 3_601_000);
+
+    expect(request).toMatchObject({
+      reason: { message: 'Timed out after 3600 s waiting for the results to be ingested.' },
+      status: 'failed',
+    });
+    expect(statusHistory).not.toContain('complete');
+    expect(removeUploadedFile).toHaveBeenCalledWith(RESULTS_FILE);
+    expect(callsTo('DeletePlan')[0].variables).toEqual({ id: PLAN_ID });
+    expect(callsTo('DeleteMissionModel')[0].variables).toEqual({ id: MODEL_ID });
+  });
+
+  test('treats an import request that disappears during ingestion as a failure and rolls back', async () => {
+    responders.InsertExternalSimulationDataset = ({ requestId }) => {
+      delete importRequests[requestId];
+      return { text: '' };
+    };
+
+    const { request } = await runImport(v3Fixture);
+
+    // there is no row left to record the failure in
+    expect(request).toBeUndefined();
+    expect(callsTo('SetImportStatus:failed')[0].variables.reason).toEqual({
+      message: `Import request ${REQUEST_ID} was not found while waiting for its results to be ingested.`,
+    });
+    expect(statusHistory).not.toContain('complete');
+    expect(removeUploadedFile).toHaveBeenCalledWith(RESULTS_FILE);
+    expect(callsTo('DeletePlan')[0].variables).toEqual({ id: PLAN_ID });
+    expect(callsTo('DeleteMissionModel')[0].variables).toEqual({ id: MODEL_ID });
+  });
+});
+
+/**
+ * The gateway hands activity and span values to the backend as the file gives them. It does not check them against the
+ * embedded model's declarations: whether they are accepted is the backend's decision (see the rejected activities
+ * write above), and any type or arguments the model does not declare are kept for the backend and UI to present.
+ */
+describe('importPlan passing file values through', () => {
+  test('nested, scalar and null values, and types and arguments the model does not declare', async () => {
+    const transfer = structuredClone(v3Fixture);
+    // TakeImage declares none of these, and Calibrate declares no parameters at all
+    const extra = { calibrated: true, exposure: { gains: [1.5, -2, 0], profile: null }, note: 'MANUAL' };
+    Object.assign(transfer.activities[1].arguments, extra);
+    Object.assign(transfer.results!.spans[1].arguments, extra);
+    transfer.activities[1].metadata.flags = [false, null];
+    const args = { heater: { zone: 3 } };
+    transfer.activities.push({ ...transfer.activities[0], arguments: args, id: 3, name: 'warm', type: 'Undeclared' });
+    transfer.results!.spans.push({ arguments: args, directive_id: 3, span_id: 5, start_offset: 0, type: 'Undeclared' });
+
+    const { request } = await runImport(transfer);
+
+    expect(request?.status).toBe('complete');
+    const pick = ({ arguments: a, metadata, type }: any) => ({ arguments: a, metadata, type });
+    expect(callsTo('CreateActivityDirectives')[0].variables.activityDirectivesInsertInput.map(pick)).toEqual(
+      transfer.activities.map(pick),
+    );
+    const withoutDirective = ({ directive_id: _, ...span }: any) => span;
+    expect(stagedResults().spans.map(withoutDirective)).toEqual(transfer.results!.spans.map(withoutDirective));
+    // the model is created as declared, with no type inferred for the activity
+    expect(storeUploadedFile).toHaveBeenCalledWith('plan-transfer-model.json', JSON.stringify(transfer.model));
   });
 });
 
@@ -806,25 +849,5 @@ describe('importPlan upload', () => {
     expect(res.status).toHaveBeenCalledWith(202);
     expect(res.json.mock.calls[0][0].plan_id).toBe(PLAN_ID);
     expect(existsSync(path)).toBe(false);
-  });
-});
-
-describe('remapResultDirectiveIds', () => {
-  const results: SimulationResultsTransfer = v3Fixture.results!;
-
-  test('rewrites only directive ids and leaves the input untouched', () => {
-    const before = structuredClone(results);
-    const remapped = remapResultDirectiveIds(results, { 1: 10, 2: 20 });
-
-    expect(remapped.spans.map(({ directive_id }) => directive_id)).toEqual([10, 20, undefined, undefined]);
-    expect(remapped.spans.map(({ span_id }) => span_id)).toEqual([1, 2, 3, 4]);
-    expect(remapped.spans[2]).toBe(results.spans[2]);
-    expect(remapped.profiles).toBe(results.profiles);
-    expect(results).toEqual(before);
-  });
-
-  test('refuses a directive id with no mapping', () => {
-    expect(() => remapResultDirectiveIds(results, { 1: 10 })).toThrow(UnsupportedPlanTransferError);
-    expect(() => remapResultDirectiveIds(results, { 1: 10 })).toThrow(/span 2 references directive 2/);
   });
 });

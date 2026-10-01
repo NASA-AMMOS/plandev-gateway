@@ -263,6 +263,13 @@ export type PlanImportRequestStatus =
 /** Why an import request failed, as stored in its `reason`. */
 type PlanImportRequestReason = { message?: string } & Record<string, unknown>;
 
+/** Merlin marked an import request failed; `reason` is what it stored, kept whole when the import is rolled back. */
+export class PlanImportRequestFailedError extends Error {
+  constructor(readonly reason: PlanImportRequestReason | null) {
+    super(reason?.message ?? `Ingesting the results failed: ${JSON.stringify(reason)}`);
+  }
+}
+
 /**
  * Records a new import, whose (empty) plan exists, in its first status. Clients follow the import through this row.
  * Written directly, like `merlin.uploaded_file`.
@@ -325,7 +332,7 @@ async function waitForPlanImportRequest(id: number): Promise<void> {
       return;
     }
     if (request.status === 'failed') {
-      throw new Error(request.reason?.message ?? `Ingesting the results failed: ${JSON.stringify(request.reason)}`);
+      throw new PlanImportRequestFailedError(request.reason);
     }
     if (Date.now() >= deadline) {
       throw new Error(`Timed out after ${IMPORT_REQUEST_TIMEOUT_MS / 1000} s waiting for the results to be ingested.`);
