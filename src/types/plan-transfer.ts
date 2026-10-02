@@ -117,7 +117,10 @@ export type SimulatedActivitySpan = {
 
   arguments: Record<string, SerializedValue>;
 
-  computed_attributes?: Record<string, SerializedValue>;
+  /**
+   * A single SerializedValue of any type, not a map like `arguments`.
+   */
+  computed_attributes?: SerializedValue;
 
   /**
    * Simulated, generated and decomposed spans do not necessarily correspond to

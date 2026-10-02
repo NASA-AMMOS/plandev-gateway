@@ -1,13 +1,13 @@
 import type { Express } from 'express';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
-import { customAlphabet } from 'nanoid';
-import path, { parse } from 'path';
+import path from 'path';
 import { getEnv } from '../../env.js';
 import getLogger from '../../logger.js';
 import { auth } from '../auth/middleware.js';
 import { DbMerlin } from '../db/db.js';
 import { FILE_PATH } from '../../util/fileParser.js';
+import { insertUploadedFile, uniqueFileName } from './store.js';
 
 const logger = getLogger('packages/files/files');
 
@@ -29,14 +29,7 @@ export default (app: Express) => {
       cb(null, fileStorePath);
     },
     filename(_, file, cb) {
-      const { originalname } = file;
-      const nanoId = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz', 14);
-      const uniqueId = nanoId();
-      const now = Date.now();
-      const { ext, name } = parse(originalname);
-      const uniqueFileName = `${name}-${now}-${uniqueId}`;
-      const fileName = `${uniqueFileName}${ext}`;
-      cb(null, fileName);
+      cb(null, uniqueFileName(file.originalname));
     },
   });
 
@@ -179,21 +172,9 @@ export default (app: Express) => {
     const [file] = req.files as Express.Multer.File[];
     const { filename } = file;
 
-    // Note because name and path are different types, we need to bind the filename variable
-    // twice so the query casts it appropriately to each type.
-    const { rowCount, rows } = await db.query(
-      `
-      insert into merlin.uploaded_file (name, path)
-      values ($1, $2)
-      returning id;
-    `,
-      [filename, filename],
-    );
+    const id = await insertUploadedFile(filename);
 
-    const [row] = rows;
-    const id = row ? row.id : null;
-
-    if (rowCount && rowCount > 0) {
+    if (id !== null) {
       logger.info(`POST /file: Added file to the database: ${id}`);
     } else {
       logger.info(`POST /file: No file was added to the database`);

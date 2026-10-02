@@ -14,6 +14,19 @@ export const planTransferSchema = {
   additionalProperties: false,
 
   definitions: {
+    // Any JSON value is a backend SerializedValue.
+    serialized_value: {
+      description: 'A SerializedValue: any JSON value.',
+    },
+
+    serialized_arguments: {
+      type: 'object',
+      description: 'Arguments by name, each a SerializedValue.',
+      additionalProperties: {
+        $ref: '#/definitions/serialized_value',
+      },
+    },
+
     tag: {
       type: 'object',
       additionalProperties: false,
@@ -215,7 +228,7 @@ export const planTransferSchema = {
           type: 'boolean',
         },
         arguments: {
-          type: 'object',
+          $ref: '#/definitions/serialized_arguments',
         },
         metadata: {
           type: 'object',
@@ -261,10 +274,11 @@ export const planTransferSchema = {
           description: 'Microseconds. Omit for an unfinished span.',
         },
         arguments: {
-          type: 'object',
+          $ref: '#/definitions/serialized_arguments',
         },
         computed_attributes: {
-          type: 'object',
+          $ref: '#/definitions/serialized_value',
+          description: "The activity's computed attributes: a single SerializedValue, of any type.",
         },
         directive_id: {
           type: 'integer',
@@ -428,7 +442,7 @@ export const planTransferSchema = {
     },
 
     simulation_arguments: {
-      type: 'object',
+      $ref: '#/definitions/serialized_arguments',
     },
 
     activities: {
