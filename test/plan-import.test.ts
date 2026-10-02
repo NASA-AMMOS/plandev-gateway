@@ -7,8 +7,8 @@ import { decodeJwt, generateJwt } from '../src/packages/auth/functions';
 import {
   PlanImportRequestFailedError,
   createNonExecutableModel,
-  createPlanImportRequest,
   deleteNonExecutableModel,
+  createPlanImportRequest,
   insertExternalSimulationDataset,
   markPlanReadOnly,
   postGraphQL,
@@ -25,8 +25,8 @@ import type { PlanTransfer } from '../src/types/plan-transfer';
 vi.mock('../src/packages/plan/non-executable-import', async importOriginal => ({
   ...(await importOriginal<object>()),
   createNonExecutableModel: vi.fn(),
-  createPlanImportRequest: vi.fn(),
   deleteNonExecutableModel: vi.fn(),
+  createPlanImportRequest: vi.fn(),
   insertExternalSimulationDataset: vi.fn(),
   markPlanReadOnly: vi.fn(),
   postGraphQL: vi.fn(),
@@ -66,8 +66,6 @@ const defaultResponders: typeof responders = {
   CreatePlan: ({ plan }) => ({ createPlan: { ...plan, id: PLAN_ID } }),
   CreatePlanTags: ({ tags }) => ({ insert_plan_tags: { affected_rows: tags.length } }),
   CreateTags: ({ tags }) => ({ insert_tags: { returning: tags.map((tag: object, i: number) => ({ ...tag, id: i })) } }),
-  DeletePlan: ({ id }) => ({ deletePlan: { id } }),
-  DeleteTags: () => ({}),
   GetPlanByName: () => ({ plan: [] }),
   GetTags: () => ({ tags: [] }),
   InitialSimulationUpdate: () => ({ update_simulation: { returning: [{ id: 1 }] } }),
@@ -281,6 +279,19 @@ describe('importPlan refusing before responding', () => {
     expect(callsTo('CreatePlan')).toHaveLength(0);
   });
 
+  test('a plan that cannot be created, deleting the model made for it', async () => {
+    responders.CreatePlan = () => {
+      throw new Error('plan insert failed');
+    };
+
+    const { error, status } = await runImport(v3Fixture);
+
+    expect(status).toBe(500);
+    expect(error).toBe('plan insert failed');
+    expect(deleteNonExecutableModel).toHaveBeenCalledWith(MODEL);
+    expect(createPlanImportRequest).not.toHaveBeenCalled();
+  });
+
   test('a file whose results reference an unknown directive, before any backend call', async () => {
     const transfer = structuredClone(v3Fixture);
     transfer.results!.spans[0].directive_id = 99;
@@ -294,23 +305,24 @@ describe('importPlan refusing before responding', () => {
 });
 
 describe('importPlan failing after responding', () => {
-  /** A failed import is recorded as failed, with its reason, before being rolled back, and never completes. */
-  function expectFailedThenRolledBack(reason: object) {
+  /** A failed import is recorded as failed, with its reason, never completes, and keeps its plan. */
+  function expectFailedAndKept(reason: object) {
     expect(setPlanImportRequestStatus).toHaveBeenCalledWith(REQUEST_ID, 'failed', reason);
     expect(statuses()).not.toContain('complete');
-    expect(whenStatus('failed')).toBeLessThan(whenOperation('DeletePlan'));
-    expect(callsTo('DeletePlan')[0][1]).toEqual({ id: PLAN_ID });
+    expect(callsTo('DeletePlan')).toHaveLength(0);
   }
 
-  test('a plan that cannot be made read-only, once its contents are written', async () => {
-    vi.mocked(markPlanReadOnly).mockRejectedValue(new Error('plan cannot be marked read only'));
+  test('activities that cannot be written, leaving a self-contained plan read-only', async () => {
+    responders.CreateActivityDirectives = () => {
+      throw new Error('activity insert failed');
+    };
 
     const { status } = await runImport(v3Fixture);
 
     expect(status).toBe(202);
-    expectFailedThenRolledBack({ message: 'plan cannot be marked read only' });
+    expectFailedAndKept({ message: 'activity insert failed' });
     expect(insertExternalSimulationDataset).not.toHaveBeenCalled();
-    expect(deleteNonExecutableModel).toHaveBeenCalledWith(MODEL);
+    expect(markPlanReadOnly).toHaveBeenCalledWith(PLAN_ID);
   });
 
   test('merlin failing to ingest the results, keeping its reason whole', async () => {
@@ -320,20 +332,14 @@ describe('importPlan failing after responding', () => {
     await runImport(v3Fixture);
 
     expect(statuses()).toContain('importing_dataset');
-    expectFailedThenRolledBack(reason);
-    expect(deleteNonExecutableModel).toHaveBeenCalledWith(MODEL);
+    expectFailedAndKept(reason);
   });
 
-  test('a cleanup failure leaves the request failed with its original reason, and keeps the model', async () => {
+  test('a plan that cannot be made read-only still fails with its original reason', async () => {
     vi.mocked(markPlanReadOnly).mockRejectedValue(new Error('plan cannot be marked read only'));
-    responders.DeletePlan = () => {
-      throw new Error('database unavailable');
-    };
 
     await runImport(v3Fixture);
 
-    expectFailedThenRolledBack({ message: 'plan cannot be marked read only' });
-    // the plan still uses the model
-    expect(deleteNonExecutableModel).not.toHaveBeenCalled();
+    expectFailedAndKept({ message: 'plan cannot be marked read only' });
   });
 });

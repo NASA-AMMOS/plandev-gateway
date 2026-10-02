@@ -79,13 +79,6 @@ export default {
       }
     }
   `,
-  DELETE_PLAN: `#graphql
-    mutation DeletePlan($id: Int!) {
-      deletePlan: delete_plan_by_pk(id: $id) {
-        id
-      }
-    }
-  `,
   DELETE_TAGS: `#graphql
     mutation DeleteTags($tagIds: [Int!]! = []) {
       delete_tags(

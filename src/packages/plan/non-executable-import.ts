@@ -3,9 +3,9 @@ import type { HasuraError } from '../../types/hasura.js';
 import type { ModelDeclaration, SerializedValue, SimulationResultsTransfer } from '../../types/plan-transfer.js';
 import { generateJwt } from '../auth/functions.js';
 import { DbMerlin } from '../db/db.js';
+import getLogger from '../../logger.js';
 import { removeUploadedFile, storeUploadedFile } from '../files/store.js';
 import { getEnv } from '../../env.js';
-import getLogger from '../../logger.js';
 import { isoToDoyTimestamp } from '../../util/time.js';
 import gql from './gql.js';
 
@@ -72,7 +72,7 @@ async function postMerlin(endpoint: string, body: Record<string, unknown>): Prom
   return text;
 }
 
-/** A non-executable model an import created, with what is needed to delete it again. */
+/** A non-executable model an import created. */
 export type CreatedNonExecutableModel = {
   definitionFile: { id: number; name: string };
   id: number;
@@ -149,10 +149,8 @@ export async function createNonExecutableModel(
 }
 
 /**
- * Deletes a non-executable model a failed import created, and then its definition file. The database only removes a
- * plan's non-executable model when a read-only plan is deleted, and a failed import never got as far as marking its
- * plan read-only, so the import has to clean up the model itself. Delete the plan first: deleting the model would
- * otherwise leave the plan with no model.
+ * Deletes a non-executable model a failed import created, and then its definition file. Only for a model whose plan could not be
+ * created; once a plan exists, deleting the plan deletes its model.
  *
  * Best-effort, since it runs while handling another failure: problems are logged, never thrown.
  */
@@ -263,7 +261,7 @@ export type PlanImportRequestStatus =
 /** Why an import request failed, as stored in its `reason`. */
 type PlanImportRequestReason = { message?: string } & Record<string, unknown>;
 
-/** Merlin marked an import request failed; `reason` is what it stored, kept whole when the import is rolled back. */
+/** Merlin marked an import request failed; `reason` is what it stored, kept whole on the failed request. */
 export class PlanImportRequestFailedError extends Error {
   constructor(readonly reason: PlanImportRequestReason | null) {
     super(reason?.message ?? `Ingesting the results failed: ${JSON.stringify(reason)}`);
