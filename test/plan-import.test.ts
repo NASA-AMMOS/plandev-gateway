@@ -306,8 +306,8 @@ describe('importPlan refusing before responding', () => {
 
 describe('importPlan failing after responding', () => {
   /** A failed import is recorded as failed, with its reason, never completes, and keeps its plan. */
-  function expectFailedAndKept(reason: object) {
-    expect(setPlanImportRequestStatus).toHaveBeenCalledWith(REQUEST_ID, 'failed', reason);
+  function expectFailedAndKept(message: string) {
+    expect(setPlanImportRequestStatus).toHaveBeenCalledWith(REQUEST_ID, 'failed', expect.objectContaining({ message }));
     expect(statuses()).not.toContain('complete');
     expect(callsTo('DeletePlan')).toHaveLength(0);
   }
@@ -320,7 +320,7 @@ describe('importPlan failing after responding', () => {
     const { status } = await runImport(v3Fixture);
 
     expect(status).toBe(202);
-    expectFailedAndKept({ message: 'activity insert failed' });
+    expectFailedAndKept('activity insert failed');
     expect(insertExternalSimulationDataset).not.toHaveBeenCalled();
     expect(markPlanReadOnly).toHaveBeenCalledWith(PLAN_ID);
   });
@@ -331,7 +331,7 @@ describe('importPlan failing after responding', () => {
     await runImport(v3Fixture);
 
     expect(statuses()).toContain('importing_dataset');
-    expectFailedAndKept({ message: 'duplicate profile segment' });
+    expectFailedAndKept('duplicate profile segment');
   });
 
   test('a plan that cannot be made read-only still fails with its original reason', async () => {
@@ -339,6 +339,6 @@ describe('importPlan failing after responding', () => {
 
     await runImport(v3Fixture);
 
-    expectFailedAndKept({ message: 'plan cannot be marked read only' });
+    expectFailedAndKept('plan cannot be marked read only');
   });
 });

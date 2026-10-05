@@ -422,9 +422,7 @@ async function finishImport(
   } catch (error) {
     logger.error(`POST /importPlan: Import request ${requestId} failed`);
     logger.error(error);
-    await setPlanImportRequestStatus(requestId, 'failed', { message: (error as Error).message }).catch(e =>
-      logger.error(e),
-    );
+    await setPlanImportRequestStatus(requestId, 'failed', error).catch(e => logger.error(e));
     if (selfContained) {
       await markPlanReadOnly(plan.id).catch(e => logger.error(e));
     }
