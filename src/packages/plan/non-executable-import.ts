@@ -5,6 +5,7 @@ import { generateJwt } from '../auth/functions.js';
 import { DbMerlin } from '../db/db.js';
 import { removeUploadedFile, storeUploadedFile } from '../files/store.js';
 import { getEnv } from '../../env.js';
+import { formatError } from '../../util/errors.js';
 import { getIntervalInMs, isoToDoyTimestamp } from '../../util/time.js';
 import gql from './gql.js';
 
@@ -215,23 +216,23 @@ export async function createPlanImportRequest({
   return rows[0].id;
 }
 
-/** Mirrors merlin's PlanImportFailure, with a FormattedError as `data`, so both writers fill `reason` the same way. */
-function toPlanImportFailure(error: unknown) {
-  const { message, stack } = error instanceof Error ? error : new Error(String(error));
-  const timestamp = new Date().toISOString();
-  const trace = stack ?? 'No trace generated.';
-  const type = 'PLAN_IMPORT_ERROR';
-
-  return { data: { message, service: 'gateway', timestamp, trace, type }, message, timestamp, trace, type };
-}
-
-/** Never overwrites a failure, so a reason merlin recorded is kept whole. */
+/**
+ * Never overwrites a failure, so a reason merlin recorded is kept whole. A failure's reason mirrors merlin's
+ * PlanImportFailure, with a FormattedError as `data`, so both writers fill `reason` the same way.
+ */
 export async function setPlanImportRequestStatus(
   id: number,
   status: PlanImportRequestStatus,
   error?: unknown,
 ): Promise<void> {
-  const reason = error === undefined ? null : toPlanImportFailure(error);
+  const data = error === undefined ? null : formatError(error, 'PLAN_IMPORT_ERROR');
+  const reason = data && {
+    data,
+    message: data.message,
+    timestamp: data.timestamp,
+    trace: data.trace ?? 'No trace generated.',
+    type: data.type,
+  };
   await DbMerlin.getDb().query(
     `update merlin.plan_import_request set status = $2, reason = $3 where id = $1 and status <> 'failed';`,
     [id, status, reason],
