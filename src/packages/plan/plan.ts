@@ -329,6 +329,7 @@ async function startImport(
     // multipart form fields arrive as strings
     modelId = Number(model_id);
   } else {
+    // model-free plan includes `model` field in JSON *instead* of a JAR model
     // Refuse a caller who can't create plans, or a taken name, before creating a model for them.
     const planName = name || transfer.name;
     await assertCanCreatePlan(headers);
