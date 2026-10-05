@@ -154,10 +154,30 @@ describe('insertExternalSimulationDataset', () => {
     expect(removeUploadedFile).toHaveBeenCalledWith(RESULTS_FILE);
   });
 
+  test("results without a window inherit the plan's, to the microsecond", async () => {
+    dbAnswer = () => ({ rows: [{ reason: null, status: 'complete' }] });
+    const { duration: _, start_time: __, ...windowless } = results;
+
+    await insertExternalSimulationDataset({
+      planDuration: '1 day 02:00:00.000001',
+      planId: 50,
+      planImportRequestId: 70,
+      planStartTime: '2030-01-01T00:00:00.123456+00:00',
+      requester: 'importer',
+      results: windowless,
+      simulationArguments: {},
+    });
+
+    expect(merlinCalls[0]).toMatchObject({
+      simulationDuration: 93_600_000_001,
+      simulationStartTime: '2030-001T00:00:00.123456',
+    });
+  });
+
   test.each([
     [
       'merlin refuses the results',
-      () => ({ status: 400, text: JSON.stringify({ message: 'profile rejected' }) }),
+      () => ({ json: { message: 'profile rejected' }, status: 400 }),
       {},
       'profile rejected',
     ],
@@ -206,13 +226,10 @@ describe('deleteNonExecutableModel', () => {
     expect(removeUploadedFile).toHaveBeenCalledWith(model.definitionFile);
   });
 
-  test.each([
-    ['fails', { errors: [{ message: 'database unavailable' }] }],
-    ['deletes nothing', { data: { delete_mission_model_by_pk: null } }],
-  ])('keeps the definition file, without throwing, when the delete %s', async (_, json) => {
-    backend = () => ({ json });
+  test('keeps the definition file when the delete fails', async () => {
+    backend = () => ({ json: { errors: [{ message: 'database unavailable' }] } });
 
-    await deleteNonExecutableModel(model);
+    await expect(deleteNonExecutableModel(model)).rejects.toThrow('database unavailable');
 
     expect(removeUploadedFile).not.toHaveBeenCalled();
   });

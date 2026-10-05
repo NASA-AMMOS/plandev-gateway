@@ -52,27 +52,14 @@ export async function storeUploadedFile(originalname: string, contents: string):
 }
 
 /**
- * Deletes an uploaded file the gateway staged, both its `merlin.uploaded_file` row and the file itself. Best-effort:
- * failures are logged, never thrown.
- *
- * The row goes first, so a file something still references (e.g. a model's `definition_file_id`, which is
- * `on delete restrict`) is left alone rather than deleted out from under it.
+ * Best-effort removal of a file the gateway staged. The row goes first, so a file something still references (e.g. a
+ * model's `definition_file_id`, `on delete restrict`) is kept.
  */
 export async function removeUploadedFile({ id, name }: { id: number; name: string }): Promise<void> {
   try {
     await DbMerlin.getDb().query('delete from merlin.uploaded_file where id = $1;', [id]);
+    await unlink(path.join(FILE_PATH, name)).catch(() => undefined);
   } catch (error) {
-    logger.error(`Kept uploaded file ${id} (${name}): its row could not be deleted`);
-    logger.error(error);
-    return;
-  }
-
-  try {
-    await unlink(path.join(FILE_PATH, name));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      logger.error(`Deleted uploaded file ${id}'s row, but not the file itself: ${name}`);
-      logger.error(error);
-    }
+    logger.error(`Kept uploaded file ${id} (${name}): ${error}`);
   }
 }

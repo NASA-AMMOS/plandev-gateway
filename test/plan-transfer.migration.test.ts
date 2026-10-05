@@ -2,7 +2,7 @@ import Ajv from 'ajv';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { describe, expect, test } from 'vitest';
-import { UnsupportedPlanTransferError, parsePlanTransfer } from '../src/packages/plan/plan-transfer';
+import { parsePlanTransfer } from '../src/packages/plan/plan-transfer';
 import { planTransferSchema } from '../src/schemas/plan-transfer-validation-schema';
 
 const validate = Ajv().compile(planTransferSchema);
@@ -54,7 +54,7 @@ describe('plan transfer migration', () => {
 
   test('non-object input is rejected', () => {
     for (const input of [null, 42, 'plan', [], undefined]) {
-      expect(() => parsePlanTransfer(input)).toThrow(UnsupportedPlanTransferError);
+      expect(() => parsePlanTransfer(input)).toThrow('Plan file must contain a JSON object.');
     }
   });
 

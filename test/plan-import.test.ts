@@ -5,7 +5,6 @@ import { fileURLToPath } from 'url';
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { decodeJwt, generateJwt } from '../src/packages/auth/functions';
 import {
-  PlanImportRequestFailedError,
   createNonExecutableModel,
   deleteNonExecutableModel,
   createPlanImportRequest,
@@ -108,6 +107,7 @@ beforeEach(() => {
   responders = { ...defaultResponders };
   vi.mocked(postGraphQL).mockImplementation(async (query, variables) => responders[operationName(query)](variables));
   vi.mocked(createNonExecutableModel).mockResolvedValue(MODEL);
+  vi.mocked(deleteNonExecutableModel).mockResolvedValue();
   vi.mocked(createPlanImportRequest).mockResolvedValue(REQUEST_ID);
   vi.mocked(setPlanImportRequestStatus).mockResolvedValue();
 });
@@ -325,14 +325,13 @@ describe('importPlan failing after responding', () => {
     expect(markPlanReadOnly).toHaveBeenCalledWith(PLAN_ID);
   });
 
-  test('merlin failing to ingest the results, keeping its reason whole', async () => {
-    const reason = { message: 'duplicate profile segment', type: 'SQL_EXCEPTION' };
-    vi.mocked(insertExternalSimulationDataset).mockRejectedValue(new PlanImportRequestFailedError(reason));
+  test('merlin failing to ingest the results', async () => {
+    vi.mocked(insertExternalSimulationDataset).mockRejectedValue(new Error('duplicate profile segment'));
 
     await runImport(v3Fixture);
 
     expect(statuses()).toContain('importing_dataset');
-    expectFailedAndKept(reason);
+    expectFailedAndKept({ message: 'duplicate profile segment' });
   });
 
   test('a plan that cannot be made read-only still fails with its original reason', async () => {

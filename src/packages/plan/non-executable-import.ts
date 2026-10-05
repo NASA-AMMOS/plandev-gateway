@@ -3,23 +3,12 @@ import type { HasuraError } from '../../types/hasura.js';
 import type { ModelDeclaration, SerializedValue, SimulationResultsTransfer } from '../../types/plan-transfer.js';
 import { generateJwt } from '../auth/functions.js';
 import { DbMerlin } from '../db/db.js';
-import getLogger from '../../logger.js';
 import { removeUploadedFile, storeUploadedFile } from '../files/store.js';
 import { getEnv } from '../../env.js';
-import { isoToDoyTimestamp } from '../../util/time.js';
+import { getIntervalInMs, isoToDoyTimestamp } from '../../util/time.js';
 import gql from './gql.js';
 
-/**
- * Backend calls for importing a self-contained PlanTransfer as a non-executable, read-only plan.
- *
- * The gateway creates the non-executable model's row through Hasura, whose event triggers then have merlin register
- * its types. Merlin owns the imported simulation dataset and the plan's read-only flag; the gateway stages files, says
- * who the caller is, and asks for the plan to be made read-only once it has finished writing to it. The import's
- * progress is tracked in a `merlin.plan_import_request` row, which the gateway and merlin both advance. How each
- * payload reaches the backend is kept inside these helpers so it can change without touching `/importPlan`.
- */
-
-const logger = getLogger('packages/plan/non-executable-import');
+/** Backend calls for importing a self-contained PlanTransfer as a non-executable, read-only plan. */
 
 const { HASURA_API_URL, PLANDEV_MERLIN_URL } = getEnv();
 
@@ -47,32 +36,20 @@ export async function postGraphQL<T>(
   return json.data;
 }
 
-/**
- * Calls one of merlin's endpoints directly rather than through Hasura, so it is not exposed to other clients, and
- * returns the response body as text. Merlin's errors are `FormattedError`s, whose `message` is thrown.
- */
-async function postMerlin(endpoint: string, body: Record<string, unknown>): Promise<string> {
+/** Calls merlin directly rather than through Hasura, so the endpoint is not exposed to other clients. */
+async function postMerlin(endpoint: string, body: Record<string, unknown>): Promise<void> {
   const response = await fetch(`${PLANDEV_MERLIN_URL}/${endpoint}`, {
     body: JSON.stringify(body),
     headers: { 'Content-Type': 'application/json' },
     method: 'POST',
   });
-  const text = await response.text();
 
   if (!response.ok) {
-    let message: string | undefined;
-    try {
-      message = (JSON.parse(text) as { message?: string }).message;
-    } catch {
-      // not a FormattedError
-    }
+    const { message } = (await response.json().catch(() => ({}))) as { message?: string };
     throw new Error(message ?? `merlin ${endpoint} failed with status ${response.status}.`);
   }
-
-  return text;
 }
 
-/** A non-executable model an import created. */
 export type CreatedNonExecutableModel = {
   definitionFile: { id: number; name: string };
   id: number;
@@ -80,23 +57,13 @@ export type CreatedNonExecutableModel = {
 };
 
 /**
- * Headers for a short-lived admin token acting as `user`. Only admins may insert or delete models through Hasura; the
- * caller must already be known to be allowed to create plans.
+ * Headers for a fresh short-lived gateway-signed token acting as `user` in `role`. Only admins may insert or delete
+ * models through Hasura, so model writes use `admin`; the caller must already be known to be allowed to create plans.
  */
-export function adminHeaders(user: string): Record<string, string> {
-  const adminToken = generateJwt(user, 'admin', ['admin'], '10s');
-  if (adminToken === null) {
-    throw new Error('Could not create a token to manage the non-executable model.');
-  }
-
-  return { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json', 'x-hasura-role': 'admin' };
-}
-
-/** Fresh gateway-owned credentials for background work, retaining the role authorized on the request. */
-export function backgroundHeaders(user: string, role: string): Record<string, string> {
+export function tokenHeaders(user: string, role: string): Record<string, string> {
   const token = generateJwt(user, role, [role], '10s');
   if (token === null) {
-    throw new Error('Could not create a token to continue the plan import.');
+    throw new Error('Could not create a token for the plan import.');
   }
 
   return {
@@ -118,7 +85,7 @@ export async function createNonExecutableModel(
   model: ModelDeclaration,
   { name, owner }: { name: string; owner: string },
 ): Promise<CreatedNonExecutableModel> {
-  const headers = adminHeaders(owner);
+  const headers = tokenHeaders(owner, 'admin');
   const definitionFile = await storeUploadedFile('plan-transfer-model.json', JSON.stringify(model));
 
   try {
@@ -148,30 +115,9 @@ export async function createNonExecutableModel(
   }
 }
 
-/**
- * Deletes a non-executable model a failed import created, and then its definition file. Only for a model whose plan could not be
- * created; once a plan exists, deleting the plan deletes its model.
- *
- * Best-effort, since it runs while handling another failure: problems are logged, never thrown.
- */
-export async function deleteNonExecutableModel({
-  definitionFile,
-  id,
-  owner,
-}: CreatedNonExecutableModel): Promise<void> {
-  try {
-    const { delete_mission_model_by_pk: deleted } = await postGraphQL<{
-      delete_mission_model_by_pk: { id: number } | null;
-    }>(gql.DELETE_MISSION_MODEL, { id }, adminHeaders(owner));
-    if (deleted?.id !== id) {
-      throw new Error('Delete returned no model.');
-    }
-  } catch (error) {
-    // the model still references its definition file, so the file stays too
-    logger.error(`Could not delete non-executable model ${id}: ${(error as Error).message}`);
-    return;
-  }
-
+/** Deletes a model whose plan could not be created; once a plan exists, deleting the plan deletes its model. */
+export async function deleteNonExecutableModel({ definitionFile, id, owner }: CreatedNonExecutableModel): Promise<void> {
+  await postGraphQL(gql.DELETE_MISSION_MODEL, { id }, tokenHeaders(owner, 'admin'));
   await removeUploadedFile(definitionFile);
 }
 
@@ -196,9 +142,7 @@ type ModelTypeRefreshStatus = {
   } | null;
 };
 
-/**
- * Waits until merlin has registered a new model's activity types, resource types and parameters.
- */
+/** Waits until merlin has registered a new model's activity types, resource types and parameters. */
 export async function waitForModelTypes(modelId: number, getHeaders: () => Record<string, string>): Promise<void> {
   const deadline = Date.now() + MODEL_TYPE_REFRESH_TIMEOUT_MS;
 
@@ -212,19 +156,17 @@ export async function waitForModelTypes(modelId: number, getHeaders: () => Recor
       throw new Error(`Model ${modelId} was not found while waiting for its types to be registered.`);
     }
 
-    const latestLogs: [string, RefreshLog | undefined][] = [
-      ['activity types', model.refresh_activity_type_logs[0]],
-      ['resource types', model.refresh_resource_type_logs[0]],
-      ['model parameters', model.refresh_model_parameter_logs[0]],
-    ];
+    const latestLogs: Record<string, RefreshLog | undefined> = {
+      'activity types': model.refresh_activity_type_logs[0],
+      'model parameters': model.refresh_model_parameter_logs[0],
+      'resource types': model.refresh_resource_type_logs[0],
+    };
 
-    const failed = latestLogs.find(([, log]) => log !== undefined && !log.pending && !log.success);
+    const failed = Object.entries(latestLogs).find(([, log]) => log && !log.pending && !log.success);
     if (failed) {
-      const [what, log] = failed;
-      throw new Error(`Registering the model's ${what} failed: ${log?.error_message ?? 'no error message given'}`);
+      throw new Error(`Registering the model's ${failed[0]} failed: ${failed[1]?.error_message}`);
     }
-
-    if (latestLogs.every(([, log]) => log !== undefined && !log.pending && log.success)) {
+    if (Object.values(latestLogs).every(log => log?.success)) {
       return;
     }
 
@@ -238,19 +180,6 @@ export async function waitForModelTypes(modelId: number, getHeaders: () => Recor
   }
 }
 
-/** Uses PostgreSQL's interval semantics, matching the value accepted for the plan duration column. */
-async function postgresIntervalToMicroseconds(interval: string): Promise<number> {
-  const { rows } = await DbMerlin.getDb().query(
-    'select round(extract(epoch from $1::interval) * 1000000)::text as microseconds;',
-    [interval],
-  );
-  const microseconds = Number(rows[0]?.microseconds);
-  if (!Number.isSafeInteger(microseconds)) {
-    throw new Error(`Plan duration cannot be represented in microseconds: ${interval}`);
-  }
-  return microseconds;
-}
-
 export type PlanImportRequestStatus =
   | 'complete'
   | 'extracting_model'
@@ -258,20 +187,7 @@ export type PlanImportRequestStatus =
   | 'importing_dataset'
   | 'importing_plan';
 
-/** Why an import request failed, as stored in its `reason`. */
-type PlanImportRequestReason = { message?: string } & Record<string, unknown>;
-
-/** Merlin marked an import request failed; `reason` is what it stored, kept whole on the failed request. */
-export class PlanImportRequestFailedError extends Error {
-  constructor(readonly reason: PlanImportRequestReason | null) {
-    super(reason?.message ?? `Ingesting the results failed: ${JSON.stringify(reason)}`);
-  }
-}
-
-/**
- * Records a new import, whose (empty) plan exists, in its first status. Clients follow the import through this row.
- * Written directly, like `merlin.uploaded_file`.
- */
+/** Records a new import, whose (empty) plan exists. Clients follow the import through this row. */
 export async function createPlanImportRequest({
   modelId,
   planId,
@@ -295,21 +211,20 @@ export async function createPlanImportRequest({
   return rows[0].id;
 }
 
+/** Never overwrites a failure, so a reason merlin recorded is kept whole. */
 export async function setPlanImportRequestStatus(
   id: number,
   status: PlanImportRequestStatus,
-  reason: PlanImportRequestReason | null = null,
+  reason: { message: string } | null = null,
 ): Promise<void> {
-  await DbMerlin.getDb().query('update merlin.plan_import_request set status = $2, reason = $3 where id = $1;', [
-    id,
-    status,
-    reason,
-  ]);
+  await DbMerlin.getDb().query(
+    `update merlin.plan_import_request set status = $2, reason = $3 where id = $1 and status <> 'failed';`,
+    [id, status, reason],
+  );
 }
 
 const IMPORT_REQUEST_POLL_MS = 1_000;
-// Recovery needs a durable worker lease/payload and the ids of every import-created record. A status-only startup
-// sweep cannot distinguish this process's abandoned work from another Gateway instance's live import.
+// note: an import abandoned by a gateway restart stays in progress
 const IMPORT_REQUEST_TIMEOUT_MS = 3_600_000;
 
 /** Waits for merlin to mark an import request complete, and throws its reason if merlin marks it failed. */
@@ -321,7 +236,7 @@ async function waitForPlanImportRequest(id: number): Promise<void> {
       'select status, reason from merlin.plan_import_request where id = $1;',
       [id],
     );
-    const [request] = rows as { reason: PlanImportRequestReason | null; status: PlanImportRequestStatus }[];
+    const [request] = rows as { reason: { message?: string } | null; status: PlanImportRequestStatus }[];
 
     if (request === undefined) {
       throw new Error(`Import request ${id} was not found while waiting for its results to be ingested.`);
@@ -330,7 +245,7 @@ async function waitForPlanImportRequest(id: number): Promise<void> {
       return;
     }
     if (request.status === 'failed') {
-      throw new PlanImportRequestFailedError(request.reason);
+      throw new Error(request.reason?.message ?? 'Ingesting the results failed.');
     }
     if (Date.now() >= deadline) {
       throw new Error(`Timed out after ${IMPORT_REQUEST_TIMEOUT_MS / 1000} s waiting for the results to be ingested.`);
@@ -341,14 +256,8 @@ async function waitForPlanImportRequest(id: number): Promise<void> {
 }
 
 /**
- * Has merlin store `results` as a successful simulation dataset for the plan, and waits until it has.
- *
- * Spans and profiles are staged as a file merlin reads from the shared file store. Merlin accepts the request, ingests
- * the file in the background and marks the import request complete or failed; the file is removed once it has. The
- * simulation's window and arguments go in the call itself, so merlin has them before reading the file: timestamps in
- * merlin's UTC day-of-year format, the duration in microseconds.
- *
- * `results` must already reference the plan's directive ids (see `remapResultDirectiveIds`).
+ * Has merlin ingest `results` (already remapped to the plan's directive ids) as a simulation dataset for the plan, via
+ * a staged file, and waits until merlin marks the import request complete or failed.
  */
 export async function insertExternalSimulationDataset({
   planDuration,
@@ -394,7 +303,7 @@ export async function insertExternalSimulationDataset({
       resultsFileId: resultsFile.id,
       simulationArguments,
       // results either carry their own window or inherit the plan's
-      simulationDuration: results.duration ?? (await postgresIntervalToMicroseconds(planDuration)),
+      simulationDuration: results.duration ?? Math.round(getIntervalInMs(planDuration) * 1000),
       simulationStartTime: isoToDoyTimestamp(results.start_time ?? planStartTime),
     });
     await waitForPlanImportRequest(planImportRequestId);
@@ -403,10 +312,7 @@ export async function insertExternalSimulationDataset({
   }
 }
 
-/**
- * Has merlin mark the imported plan read-only, once the gateway has finished writing to it: from then on the database
- * refuses changes to its activities, simulation and bounds, the gateway's included.
- */
+/** Once the gateway has finished writing to the plan, has merlin make it read-only. */
 export async function markPlanReadOnly(planId: number): Promise<void> {
   await postMerlin('markPlanReadOnly', { planId });
 }

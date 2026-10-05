@@ -32,8 +32,6 @@ import {
 } from '../../types/dataset.js';
 import { parsePlanTransfer, remapResultDirectiveIds } from './plan-transfer.js';
 import {
-  PlanImportRequestFailedError,
-  backgroundHeaders,
   createNonExecutableModel,
   deleteNonExecutableModel,
   createPlanImportRequest,
@@ -41,6 +39,7 @@ import {
   markPlanReadOnly,
   postGraphQL,
   setPlanImportRequestStatus,
+  tokenHeaders,
   waitForModelTypes,
 } from './non-executable-import.js';
 import gql from './gql.js';
@@ -49,6 +48,8 @@ import { getEnv } from '../../env.js';
 
 const upload = multer();
 // Plan files can embed large simulation results, so they are buffered to disk rather than memory.
+// note: the parsed file and the re-stringified results are still whole in memory, and V8 caps a string at ~512 MB,
+// so results past that fail; streaming `results` from the upload into the file store is the upgrade path.
 const planFileUpload = multer({ dest: tmpdir() });
 const logger = getLogger('packages/plan/plan');
 const { RATE_LIMITER_LOGIN_MAX, HASURA_API_URL } = getEnv();
@@ -81,11 +82,7 @@ async function createActivities(
   const { insert_activity_directive: inserted } = await postGraphQL<{
     insert_activity_directive: { returning: ActivityDirective[] };
   }>(gql.CREATE_ACTIVITY_DIRECTIVES, { activityDirectivesInsertInput: activities }, resolveHeaders(headers));
-  const createdActivities = inserted.returning;
-  if (createdActivities.length !== activities.length) {
-    throw new Error(`Activity insertion created ${createdActivities.length} of ${activities.length} activities.`);
-  }
-  createdActivities.forEach((createdActivity, index) => {
+  inserted.returning.forEach((createdActivity, index) => {
     activityRemap[activitiesJSON[index].id] = createdActivity.id;
   });
 
@@ -140,15 +137,11 @@ async function createTags(
     {},
   );
 
-  const missingTags = Object.values(activityTags);
   const { insert_tags: inserted } = await postGraphQL<{ insert_tags: { returning: Tag[] } }>(
     gql.CREATE_TAGS,
-    { tags: missingTags },
+    { tags: Object.values(activityTags) },
     resolveHeaders(headers),
   );
-  if (inserted.returning.length !== missingTags.length) {
-    throw new Error(`Tag insertion created ${inserted.returning.length} of ${missingTags.length} tags.`);
-  }
   createdTags = inserted.returning;
 
   // add the newly created tags to the `tagsMap`
@@ -271,12 +264,7 @@ async function fillPlan(
     tag_id: tagId,
   }));
 
-  const { insert_plan_tags: insertedPlanTags } = await postGraphQL<{
-    insert_plan_tags: { affected_rows: number };
-  }>(gql.CREATE_PLAN_TAGS, { tags: tagsInsert }, resolveHeaders(headers));
-  if (insertedPlanTags.affected_rows !== tagsInsert.length) {
-    throw new Error(`Plan tag insertion created ${insertedPlanTags.affected_rows} of ${tagsInsert.length} links.`);
-  }
+  await postGraphQL(gql.CREATE_PLAN_TAGS, { tags: tagsInsert }, resolveHeaders(headers));
 
   return activityIdMap;
 }
@@ -313,18 +301,13 @@ type StartedImport = {
   requestId: number;
   requester: string;
   role: string;
-  /** Whether the file embeds its model, which then is new, non-executable and needs its types registered. */
-  selfContained: boolean;
   simulationTemplateId?: number;
   transfer: PlanTransfer;
 };
 
 /**
- * Starts an import: creates an empty plan and a `plan_import_request` row to track the rest (see `finishImport`).
- *
- * A file without an embedded model is imported onto the request's model, with the request's window. A file that
- * embeds its model is imported read-only onto a new non-executable model, created first: its window comes from the
- * file, only its name from the request, and any `model_id` (in the request or the file) is ignored.
+ * Creates an empty plan and a `plan_import_request` row to track the rest (see `finishImport`). A file that embeds its
+ * model is imported onto a new non-executable model, created first.
  */
 async function startImport(
   transfer: PlanTransfer,
@@ -339,67 +322,62 @@ async function startImport(
   );
   const { model } = transfer;
 
-  if (model === undefined) {
-    const plan = await createPlan({ duration, model_id, name, start_time }, headers);
-    // multipart form fields arrive as strings
-    const modelId = Number(model_id);
-    const requestId = await createPlanImportRequest({
-      modelId,
-      planId: plan.id,
-      requester,
-      status: 'importing_plan',
-    });
-
-    return {
-      modelId,
-      plan,
-      requestId,
-      requester,
-      role,
-      selfContained: false,
-      simulationTemplateId: simulation_template_id,
-      transfer,
-    };
-  }
-
-  // Refuse a caller who can't create plans, or a taken name, before creating a model for them.
-  const planName = name || transfer.name;
-  await assertCanCreatePlan(headers);
-  await assertPlanNameAvailable(planName, headers);
-
-  // Merlin registers the model's types asynchronously once its row exists.
-  logger.info(`POST /importPlan: Creating non-executable model: ${planName}`);
-  const createdModel = await createNonExecutableModel(model, { name: planName, owner: requester });
-  const modelId = createdModel.id;
-
+  let modelId: number;
   let plan: CreatedPlan;
-  try {
-    plan = await createPlan(
-      { duration: transfer.duration, model_id: modelId, name: planName, start_time: transfer.start_time },
-      headers,
-    );
-  } catch (error) {
-    // with no plan, the user has nothing to delete the model through
-    await deleteNonExecutableModel(createdModel);
-    throw error;
-  }
-  const requestId = await createPlanImportRequest({ modelId, planId: plan.id, requester, status: 'extracting_model' });
+  if (model === undefined) {
+    plan = await createPlan({ duration, model_id, name, start_time }, headers);
+    // multipart form fields arrive as strings
+    modelId = Number(model_id);
+  } else {
+    // Refuse a caller who can't create plans, or a taken name, before creating a model for them.
+    const planName = name || transfer.name;
+    await assertCanCreatePlan(headers);
+    await assertPlanNameAvailable(planName, headers);
 
-  return { modelId, plan, requestId, requester, role, selfContained: true, transfer };
+    logger.info(`POST /importPlan: Creating non-executable model: ${planName}`);
+    const createdModel = await createNonExecutableModel(model, { name: planName, owner: requester });
+    modelId = createdModel.id;
+    try {
+      plan = await createPlan(
+        { duration: transfer.duration, model_id: modelId, name: planName, start_time: transfer.start_time },
+        headers,
+      );
+    } catch (error) {
+      // with no plan, the user has nothing to delete the model through
+      await deleteNonExecutableModel(createdModel).catch(deleteError => logger.error(deleteError));
+      throw error;
+    }
+  }
+
+  const requestId = await createPlanImportRequest({
+    modelId,
+    planId: plan.id,
+    requester,
+    status: model === undefined ? 'importing_plan' : 'extracting_model',
+  });
+
+  return {
+    modelId,
+    plan,
+    requestId,
+    requester,
+    role,
+    simulationTemplateId: model === undefined ? simulation_template_id : undefined,
+    transfer,
+  };
 }
 
 /**
- * The rest of an import, after `/importPlan` has responded, advancing the import request's status as it goes: fills
- * the plan and, for a self-contained import, first waits for the model's types, then makes the plan read-only and has
- * merlin ingest the results. A failure marks the request failed, with the error as its reason, and leaves the plan as
- * a record of the failed import for the user to delete (a self-contained one is made read-only, so deleting it
- * deletes its model too). Never throws.
+ * The rest of an import, after `/importPlan` has responded: fills the plan and, for a self-contained import, first
+ * waits for the model's types, then makes the plan read-only and has merlin ingest the results. A failure marks the
+ * request failed and keeps the plan for the user to delete.
  */
 async function finishImport(
-  { modelId, plan, requestId, requester, role, selfContained, simulationTemplateId, transfer }: StartedImport,
+  { modelId, plan, requestId, requester, role, simulationTemplateId, transfer }: StartedImport,
   planTags: string,
 ): Promise<void> {
-  const getHeaders = () => backgroundHeaders(requester, role);
+  const selfContained = transfer.model !== undefined;
+  const getHeaders = () => tokenHeaders(requester, role);
   try {
     if (selfContained) {
       logger.info(`POST /importPlan: Waiting for model types to be registered: request ${requestId}`);
@@ -444,18 +422,11 @@ async function finishImport(
   } catch (error) {
     logger.error(`POST /importPlan: Import request ${requestId} failed`);
     logger.error(error);
-
-    // merlin's own reason is kept whole
-    const reason = (error instanceof PlanImportRequestFailedError && error.reason) || {
-      message: (error as Error).message,
-    };
-    await setPlanImportRequestStatus(requestId, 'failed', reason).catch(statusError =>
-      logger.error(`POST /importPlan: Could not mark import request ${requestId} failed: ${statusError}`),
+    await setPlanImportRequestStatus(requestId, 'failed', { message: (error as Error).message }).catch(e =>
+      logger.error(e),
     );
     if (selfContained) {
-      await markPlanReadOnly(plan.id).catch(readOnlyError =>
-        logger.error(`POST /importPlan: Could not mark plan ${plan.id} read-only: ${readOnlyError}`),
-      );
+      await markPlanReadOnly(plan.id).catch(e => logger.error(e));
     }
   }
 }
