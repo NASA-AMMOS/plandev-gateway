@@ -28,7 +28,7 @@ export type ImportPlanPayload = {
   simulation_template_id: number;
   simulation_arguments: ArgumentsMap;
   start_time: string;
-  tags: string;
+  tags?: string;
 };
 
 export type Argument = any;

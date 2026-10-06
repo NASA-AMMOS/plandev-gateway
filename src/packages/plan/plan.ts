@@ -461,7 +461,7 @@ export async function importPlan(req: Request, res: Response) {
     res.json({ model_id: started.modelId, plan_id: started.plan.id, plan_import_request_id: started.requestId });
 
     // 3. Finish in the background; awaited only so the temporary upload is removed afterwards.
-    await finishImport(started, payload.tags);
+    await finishImport(started, payload.tags ?? '[]');
   } catch (error) {
     logger.error(`POST /importPlan: Error occurred during plan ${payload.name} import`);
     logger.error(error);
