@@ -165,13 +165,16 @@ describe('PlanTransfer v3 schema', () => {
       );
     });
 
-    test('a real resource profile, including a gap segment', () => {
+    test('a real resource profile with dynamics on every segment', () => {
       expectValid(
         withResults({
           profiles: {
             '/battery/state_of_charge': {
               schema: realSchema,
-              segments: [{ dynamics: { initial: 0.92, rate: -0.00002 }, duration: 600 }, { duration: 300 }],
+              segments: [
+                { dynamics: { initial: 0.92, rate: -0.00002 }, duration: 600 },
+                { dynamics: { initial: 0.92, rate: 0 }, duration: 300 },
+              ],
               type: 'real',
             },
           },
@@ -180,13 +183,17 @@ describe('PlanTransfer v3 schema', () => {
       );
     });
 
-    test('a discrete resource profile, including a gap segment', () => {
+    test('a discrete resource profile with dynamics on every segment', () => {
       expectValid(
         withResults({
           profiles: {
             '/camera/mode': {
               schema: { type: 'string' },
-              segments: [{ dynamics: 'IMAGING', duration: 600 }, { duration: 300 }, { dynamics: null, duration: 1 }],
+              segments: [
+                { dynamics: 'IMAGING', duration: 600 },
+                { dynamics: 'IDLE', duration: 300 },
+                { dynamics: null, duration: 1 },
+              ],
               type: 'discrete',
             },
           },
@@ -309,6 +316,33 @@ describe('PlanTransfer v3 schema', () => {
               schema: realSchema,
               segments: [{ dynamics: { initial: 0.92 }, duration: 600 }],
               type: 'real',
+            },
+          },
+          spans: [],
+        }),
+      );
+    });
+
+    test('a profile segment omitting dynamics', () => {
+      expectInvalid(
+        withResults({
+          profiles: {
+            '/battery/state_of_charge': {
+              schema: realSchema,
+              segments: [{ duration: 600 }],
+              type: 'real',
+            },
+          },
+          spans: [],
+        }),
+      );
+      expectInvalid(
+        withResults({
+          profiles: {
+            '/camera/mode': {
+              schema: { type: 'string' },
+              segments: [{ duration: 600 }],
+              type: 'discrete',
             },
           },
           spans: [],

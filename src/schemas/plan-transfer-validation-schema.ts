@@ -304,7 +304,7 @@ export const planTransferSchema = {
         dynamics: {
           type: 'object',
           additionalProperties: false,
-          description: 'Omit dynamics to represent a profile gap.',
+          description: 'Required. PlanTransfer v3 does not support profile gaps.',
           properties: {
             initial: {
               type: 'number',
@@ -317,7 +317,7 @@ export const planTransferSchema = {
           required: ['initial', 'rate'],
         },
       },
-      required: ['duration'],
+      required: ['duration', 'dynamics'],
     },
 
     discrete_profile_segment: {
@@ -330,10 +330,10 @@ export const planTransferSchema = {
           description: 'Microseconds.',
         },
         dynamics: {
-          description: 'Omit dynamics to represent a profile gap.',
+          description: 'Required. PlanTransfer v3 does not support profile gaps; null is a valid value.',
         },
       },
-      required: ['duration'],
+      required: ['duration', 'dynamics'],
     },
 
     resource_profile: {

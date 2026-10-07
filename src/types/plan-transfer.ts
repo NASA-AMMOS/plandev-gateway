@@ -175,12 +175,31 @@ export type ProfileSet =
 export type ProfileSets = Record<string, ProfileSet>;
 
 /**
+ * PlanTransfer simulation results cannot contain profile gaps. Keep these
+ * types separate from ProfileSet, which is also used by the dataset
+ * upload endpoint where omitted dynamics can still represent a gap.
+ */
+export type TransferRealProfileSegment = Omit<RealProfileSegment, 'dynamics'> & {
+  dynamics: NonNullable<RealProfileSegment['dynamics']>;
+};
+
+export type TransferDiscreteProfileSegment = Omit<DiscreteProfileSegment, 'dynamics'> & {
+  dynamics: SerializedValue;
+};
+
+export type TransferProfileSet =
+  | { type: 'real'; schema: ValueSchema; segments: TransferRealProfileSegment[] }
+  | { type: 'discrete'; schema: ValueSchema; segments: TransferDiscreteProfileSegment[] };
+
+export type TransferProfileSets = Record<string, TransferProfileSet>;
+
+/**
  * Result timing inherits the plan window, or overrides it with both a start
  * time and a duration for a subset simulation.
  */
 export type SimulationResultsTransfer = {
   spans: SimulatedActivitySpan[];
-  profiles: ProfileSets;
+  profiles: TransferProfileSets;
 } & ({ start_time: string; duration: number } | { start_time?: never; duration?: never });
 
 export type PlanTransfer = {
