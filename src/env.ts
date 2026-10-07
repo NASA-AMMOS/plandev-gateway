@@ -23,6 +23,7 @@ export type Env = {
   PLANDEV_DB: string;
   PLANDEV_DB_HOST: string;
   PLANDEV_DB_PORT: string;
+  PLANDEV_MERLIN_URL: string;
   GATEWAY_DB_USER: string;
   GATEWAY_DB_PASSWORD: string;
   RATE_LIMITER_FILES_MAX: number;
@@ -53,6 +54,7 @@ export const defaultEnv: Env = {
   PLANDEV_DB: 'plandev',
   PLANDEV_DB_HOST: 'localhost',
   PLANDEV_DB_PORT: '5432',
+  PLANDEV_MERLIN_URL: 'http://plandev_merlin:27183',
   PORT: '9000',
   RATE_LIMITER_FILES_MAX: 1000,
   RATE_LIMITER_LOGIN_MAX: 1000,
@@ -129,6 +131,7 @@ export function getEnv(): Env {
   const PLANDEV_DB = env['PLANDEV_DB'] ?? defaultEnv.PLANDEV_DB;
   const PLANDEV_DB_HOST = env['PLANDEV_DB_HOST'] ?? env['AERIE_DB_HOST'] ?? defaultEnv.PLANDEV_DB_HOST;
   const PLANDEV_DB_PORT = env['PLANDEV_DB_PORT'] ?? env['AERIE_DB_PORT'] ?? defaultEnv.PLANDEV_DB_PORT;
+  const PLANDEV_MERLIN_URL = env['PLANDEV_MERLIN_URL'] ?? defaultEnv.PLANDEV_MERLIN_URL;
   const GATEWAY_DB_USER = env['GATEWAY_DB_USER'] ?? defaultEnv.GATEWAY_DB_USER;
   const GATEWAY_DB_PASSWORD = env['GATEWAY_DB_PASSWORD'] ?? defaultEnv.GATEWAY_DB_PASSWORD;
   const RATE_LIMITER_FILES_MAX = parseNumber(env['RATE_LIMITER_FILES_MAX'], defaultEnv.RATE_LIMITER_FILES_MAX);
@@ -158,6 +161,7 @@ export function getEnv(): Env {
     PLANDEV_DB,
     PLANDEV_DB_HOST,
     PLANDEV_DB_PORT,
+    PLANDEV_MERLIN_URL,
     PORT,
     RATE_LIMITER_FILES_MAX,
     RATE_LIMITER_LOGIN_MAX,

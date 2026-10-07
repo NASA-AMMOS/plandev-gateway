@@ -1,90 +1,134 @@
 import Ajv from 'ajv';
 import { planTransferSchema } from '../../schemas/plan-transfer-validation-schema.js';
-import type { PlanTransfer } from '../../types/plan-transfer.js';
-
-/**
- * Compatibility boundary for uploaded plan files.
- *
- * Older supported PlanTransfer versions are migrated to the current
- * version and only then validated against its schema, so the rest of the
- * gateway only ever sees a current PlanTransfer.
- *
- *   raw JSON -> migrate -> validate -> PlanTransfer
- *
- * Supported inputs:
- *   v3           canonical
- *   v2           previous version; structurally a subset of v3
- *   versionless  pre-version export using the same shape as v2
- */
+import type { PlanTransfer, SimulationResultsTransfer } from '../../types/plan-transfer.js';
 
 const ajv = new Ajv({ allErrors: true });
 const validatePlanTransfer = ajv.compile(planTransferSchema);
 
-export class UnsupportedPlanTransferError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'UnsupportedPlanTransferError';
-  }
-}
-
-type JsonObject = Record<string, unknown>;
-
-function isObject(value: unknown): value is JsonObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 /**
- * v2 is structurally a subset of v3, so the migration is the version bump
- * itself. A file claiming v2 must not carry fields that only exist in v3.
+ * Migrates a v3, v2 or versionless (v2-shaped) plan file to v3. v2 is a subset of v3, so migrating is the version bump.
  */
-function migrateV2ToV3(input: JsonObject): JsonObject {
-  for (const field of ['model', 'results'] as const) {
-    if (input[field] !== undefined) {
-      throw new UnsupportedPlanTransferError(`'${field}' requires PlanTransfer version '3'.`);
+function migratePlanTransfer(input: unknown): Record<string, unknown> {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    throw new Error('Plan file must contain a JSON object.');
+  }
+
+  const { version } = input as Record<string, unknown>;
+  if (version === '3') {
+    return input as Record<string, unknown>;
+  }
+  if (version !== undefined && version !== '2') {
+    throw new Error(`Unsupported PlanTransfer version '${version}'.`);
+  }
+  for (const field of ['model', 'results']) {
+    if (field in input) {
+      throw new Error(`'${field}' requires PlanTransfer version '3'.`);
     }
   }
-
   return { ...input, version: '3' };
 }
 
-/**
- * Migrates a supported plan file to the current canonical version. The result is
- * not yet trusted — `parsePlanTransfer` validates it before returning.
- *
- * To add v4 later, each case migrates through to the current version, e.g.
- * `case '2': return migrateV3ToV4(migrateV2ToV3(input))`.
- */
-function migratePlanTransfer(input: unknown): JsonObject {
-  if (!isObject(input)) {
-    throw new UnsupportedPlanTransferError('Plan file must contain a JSON object.');
-  }
-
-  const { version } = input;
-  // Pre-version exports used the same plan shape that v2 later declared.
-  const sourceVersion = version === undefined ? '2' : version;
-
-  switch (sourceVersion) {
-    case '2':
-      return migrateV2ToV3(input);
-    case '3':
-      return input;
-    default:
-      throw new UnsupportedPlanTransferError(`Unsupported PlanTransfer version '${version}'.`);
-  }
-}
-
-/**
- * Parses an uploaded plan file of any supported version into the current
- * canonical PlanTransfer. Throws UnsupportedPlanTransferError if the file cannot
- * be migrated or the migrated result does not satisfy the canonical schema.
- */
+/** Parses an uploaded plan file of any supported version into a validated v3 PlanTransfer. */
 export function parsePlanTransfer(input: unknown): PlanTransfer {
   const migrated = migratePlanTransfer(input);
 
   if (!validatePlanTransfer(migrated)) {
     const details = (validatePlanTransfer.errors ?? []).map(({ dataPath, message }) => `${dataPath || '/'} ${message}`);
-    throw new UnsupportedPlanTransferError(`Plan file is not a valid PlanTransfer v3: ${details.join('; ')}`);
+    throw new Error(`Plan file is not a valid PlanTransfer v3: ${details.join('; ')}`);
   }
 
-  return migrated as PlanTransfer;
+  const transfer = migrated as PlanTransfer;
+  assertActivityIdsUnique(transfer);
+  assertSpansConsistent(transfer);
+
+  return transfer;
+}
+
+/** Activity ids are file-local keys used by anchors and result spans, so they must be unambiguous. */
+function assertActivityIdsUnique({ activities }: PlanTransfer): void {
+  const seen = new Set<number>();
+  for (const { id } of activities) {
+    if (seen.has(id)) {
+      throw new Error(`Activity id ${id} is used more than once.`);
+    }
+    seen.add(id);
+  }
+}
+
+/**
+ * Checks the rules between `results.spans` that the schema cannot express, so a bad file fails before anything is
+ * created:
+ *   - `span_id`s are unique, and each directive has at most one span
+ *   - a span with a `directive_id` is a root: it references an activity in this file and has no `parent_id`
+ *   - every `parent_id` chain ends at a root, without dangling references or loops
+ * A span with neither (e.g. one spawned by model code) is a root that no directive owns.
+ */
+function assertSpansConsistent({ activities, results }: PlanTransfer): void {
+  if (results === undefined) {
+    return;
+  }
+
+  const activityIds = new Set(activities.map(({ id }) => id));
+  const parentOf = new Map<number, number | undefined>();
+  const spanOfDirective = new Map<number, number>();
+
+  for (const { directive_id, parent_id, span_id } of results.spans) {
+    if (parentOf.has(span_id)) {
+      throw new Error(`Result span id ${span_id} is used more than once.`);
+    }
+    parentOf.set(span_id, parent_id);
+
+    if (directive_id === undefined) {
+      continue;
+    }
+    if (parent_id !== undefined) {
+      throw new Error(
+        `Result span ${span_id} has both a directive_id and a parent_id; a directive's span must be a root.`,
+      );
+    }
+    if (!activityIds.has(directive_id)) {
+      throw new Error(
+        `Result span ${span_id} references directive ${directive_id}, which is not an activity in this plan file.`,
+      );
+    }
+    const otherSpan = spanOfDirective.get(directive_id);
+    if (otherSpan !== undefined) {
+      throw new Error(
+        `Result spans ${otherSpan} and ${span_id} both reference directive ${directive_id}.`,
+      );
+    }
+    spanOfDirective.set(directive_id, span_id);
+  }
+
+  // Each chain is walked once: spans already known to reach a root end the walk early.
+  const reachesRoot = new Set<number>();
+  for (const start of parentOf.keys()) {
+    const chain = new Set<number>();
+    for (let id: number | undefined = start; id !== undefined && !reachesRoot.has(id); id = parentOf.get(id)) {
+      if (!parentOf.has(id)) {
+        throw new Error(
+          `A result span's parent_id references span ${id}, which is not in the results.`,
+        );
+      }
+      if (chain.has(id)) {
+        throw new Error(`Result span ${id}'s parent_id chain loops back on itself.`);
+      }
+      chain.add(id);
+    }
+    chain.forEach(id => reachesRoot.add(id));
+  }
+}
+
+/**
+ * Rewrites `results.spans[].directive_id` from the file's activity ids to the imported ones. Every `directive_id` was
+ * checked against the file's activities by `parsePlanTransfer`.
+ */
+export function remapResultDirectiveIds(
+  results: SimulationResultsTransfer,
+  activityIdMap: Record<number, number>,
+): SimulationResultsTransfer {
+  const spans = results.spans.map(span =>
+    span.directive_id === undefined ? span : { ...span, directive_id: activityIdMap[span.directive_id] },
+  );
+  return { ...results, spans };
 }

@@ -2,6 +2,7 @@ import Ajv from 'ajv';
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { describe, expect, test } from 'vitest';
+import { parsePlanTransfer } from '../src/packages/plan/plan-transfer';
 import { planTransferSchema } from '../src/schemas/plan-transfer-validation-schema';
 
 const ajv = Ajv();
@@ -148,13 +149,32 @@ describe('PlanTransfer v3 schema', () => {
       );
     });
 
-    test('a real resource profile, including a gap segment', () => {
+    // computed attributes are a single SerializedValue, so any JSON value
+    test.each([
+      ['a number', 42],
+      ['a string', 'IMG-0001'],
+      ['an array', ['a']],
+      ['a boolean', true],
+      ['null', null],
+    ])('computed attributes as %s', (_, computed_attributes) => {
+      expectValid(
+        withResults({
+          profiles: {},
+          spans: [{ arguments: {}, computed_attributes, span_id: 1, start_offset: 0, type: 'TakeImage' }],
+        }),
+      );
+    });
+
+    test('a real resource profile with dynamics on every segment', () => {
       expectValid(
         withResults({
           profiles: {
             '/battery/state_of_charge': {
               schema: realSchema,
-              segments: [{ dynamics: { initial: 0.92, rate: -0.00002 }, duration: 600 }, { duration: 300 }],
+              segments: [
+                { dynamics: { initial: 0.92, rate: -0.00002 }, duration: 600 },
+                { dynamics: { initial: 0.92, rate: 0 }, duration: 300 },
+              ],
               type: 'real',
             },
           },
@@ -163,13 +183,17 @@ describe('PlanTransfer v3 schema', () => {
       );
     });
 
-    test('a discrete resource profile, including a gap segment', () => {
+    test('a discrete resource profile with dynamics on every segment', () => {
       expectValid(
         withResults({
           profiles: {
             '/camera/mode': {
               schema: { type: 'string' },
-              segments: [{ dynamics: 'IMAGING', duration: 600 }, { duration: 300 }, { dynamics: null, duration: 1 }],
+              segments: [
+                { dynamics: 'IMAGING', duration: 600 },
+                { dynamics: 'IDLE', duration: 300 },
+                { dynamics: null, duration: 1 },
+              ],
               type: 'discrete',
             },
           },
@@ -249,24 +273,6 @@ describe('PlanTransfer v3 schema', () => {
       expectInvalid(withResults({ duration: 21600000000, profiles: {}, spans: [] }));
     });
 
-    test('primitive computed_attributes', () => {
-      expectInvalid(
-        withResults({
-          profiles: {},
-          spans: [{ arguments: {}, computed_attributes: 42, span_id: 1, start_offset: 0, type: 'TakeImage' }],
-        }),
-      );
-    });
-
-    test('array computed_attributes', () => {
-      expectInvalid(
-        withResults({
-          profiles: {},
-          spans: [{ arguments: {}, computed_attributes: ['a'], span_id: 1, start_offset: 0, type: 'TakeImage' }],
-        }),
-      );
-    });
-
     test('required_parameters without parameters', () => {
       expectInvalid(withActivityType({ name: 'TakeImage', required_parameters: ['target'] }));
     });
@@ -317,6 +323,33 @@ describe('PlanTransfer v3 schema', () => {
       );
     });
 
+    test('a profile segment omitting dynamics', () => {
+      expectInvalid(
+        withResults({
+          profiles: {
+            '/battery/state_of_charge': {
+              schema: realSchema,
+              segments: [{ duration: 600 }],
+              type: 'real',
+            },
+          },
+          spans: [],
+        }),
+      );
+      expectInvalid(
+        withResults({
+          profiles: {
+            '/camera/mode': {
+              schema: { type: 'string' },
+              segments: [{ duration: 600 }],
+              type: 'discrete',
+            },
+          },
+          spans: [],
+        }),
+      );
+    });
+
     test('a resource profile without its ValueSchema', () => {
       expectInvalid(
         withResults({ profiles: { '/battery/state_of_charge': { segments: [], type: 'real' } }, spans: [] }),
@@ -348,5 +381,80 @@ describe('PlanTransfer v3 schema', () => {
         }),
       );
     });
+  });
+});
+
+/*
+ * Rules between spans, which the schema cannot express; checked by parsePlanTransfer.
+ */
+describe('PlanTransfer span rules', () => {
+  const span = (span_id: number, fields: { directive_id?: number; parent_id?: number } = {}) => ({
+    arguments: {},
+    span_id,
+    start_offset: 0,
+    type: 'TakeImage',
+    ...fields,
+  });
+  const withSpans = (...spans: unknown[]) => withResults({ profiles: {}, spans });
+
+  test('accepts a directive span with children, and a root no directive owns', () => {
+    const transfer = withSpans(
+      span(1, { directive_id: 1 }),
+      span(2, { parent_id: 1 }),
+      span(3, { parent_id: 2 }),
+      span(4),
+      span(5, { parent_id: 4 }),
+    );
+
+    expect(() => parsePlanTransfer(transfer)).not.toThrow();
+  });
+
+  test('accepts a child listed before its parent', () => {
+    expect(() => parsePlanTransfer(withSpans(span(2, { parent_id: 1 }), span(1)))).not.toThrow();
+  });
+
+  test.each([
+    ['a duplicate span_id', [span(1), span(1)], 'Result span id 1 is used more than once.'],
+    [
+      'a directive that is not an activity',
+      [span(1, { directive_id: 99 })],
+      'Result span 1 references directive 99, which is not an activity in this plan file.',
+    ],
+    [
+      'two spans for one directive',
+      [span(1, { directive_id: 1 }), span(2, { directive_id: 1 })],
+      'Result spans 1 and 2 both reference directive 1.',
+    ],
+    [
+      'a directive span with a parent',
+      [span(1), span(2, { directive_id: 1, parent_id: 1 })],
+      "Result span 2 has both a directive_id and a parent_id; a directive's span must be a root.",
+    ],
+    [
+      'a parent that is not a span',
+      [span(1, { parent_id: 7 })],
+      "A result span's parent_id references span 7, which is not in the results.",
+    ],
+    [
+      'a span that is its own parent',
+      [span(1, { parent_id: 1 })],
+      "Result span 1's parent_id chain loops back on itself.",
+    ],
+    [
+      'a parent_id loop',
+      [span(1, { parent_id: 3 }), span(2, { parent_id: 1 }), span(3, { parent_id: 2 })],
+      "Result span 1's parent_id chain loops back on itself.",
+    ],
+  ])('refuses %s', (_, spans, message) => {
+    expect(() => parsePlanTransfer(withSpans(...spans))).toThrow(message);
+  });
+});
+
+describe('PlanTransfer activity rules', () => {
+  test('refuses duplicate activity ids before import', () => {
+    const activity = plainPlan.activities[0];
+    expect(() =>
+      parsePlanTransfer({ ...plainPlan, activities: [activity, { ...activity, name: 'duplicate' }] }),
+    ).toThrow('Activity id 1 is used more than once.');
   });
 });
