@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import fetch from 'node-fetch';
 import { removeUploadedFile, storeUploadedFile } from '../src/packages/files/store';
 import {
+  createNonExecutableModel,
   deleteNonExecutableModel,
   insertExternalSimulationDataset,
   waitForModelTypes,
@@ -48,6 +49,27 @@ async function advancing<T>(promise: Promise<T>, ms: number): Promise<T> {
   await vi.advanceTimersByTimeAsync(ms);
   return promise;
 }
+
+describe('createNonExecutableModel', () => {
+  test('labels the stored model with its plan name and a seconds-only import timestamp', async () => {
+    vi.setSystemTime(new Date('2026-10-07T18:30:45.987Z'));
+    const model = { activity_types: [], resource_types: [], metadata: { mission: 'Demo mission' } };
+    backend = () => ({ json: { data: { insert_mission_model_one: { id: 900 } } } });
+
+    await createNonExecutableModel(model, { name: 'Demo plan', owner: 'importer' });
+
+    const [, init] = vi.mocked(fetch).mock.calls[0];
+    expect(JSON.parse(init!.body as string).variables).toEqual({
+      definition_file_id: RESULTS_FILE.id,
+      description:
+        'Non-executable model imported with the plan "Demo plan". It declares 0 activity type(s) and 0 resource type(s) and cannot be simulated.',
+      mission: 'Demo mission',
+      name: 'Model for plan Demo plan',
+      owner: 'importer',
+      version: '2026-10-07T18:30:45Z',
+    });
+  });
+});
 
 describe('waitForModelTypes', () => {
   type Log = { error_message: string | null; pending: boolean; success: boolean } | undefined;

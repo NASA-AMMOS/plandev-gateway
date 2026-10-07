@@ -98,10 +98,10 @@ export async function createNonExecutableModel(
         definition_file_id: definitionFile.id,
         description: describeNonExecutableModel(model, name),
         mission: typeof model.metadata?.mission === 'string' ? model.metadata.mission : '',
-        name,
+        name: `Model for plan ${name}`,
         owner,
-        // unique for the (mission, name, version) key, and tells the user when it was imported
-        version: new Date().toISOString(),
+        // Show when the model was imported, with seconds precision for readability.
+        version: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
       },
       headers,
     );
