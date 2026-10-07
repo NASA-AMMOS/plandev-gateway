@@ -22,6 +22,19 @@ export type TransferTag = {
   };
 };
 
+export type CreatedNonExecutableModel = {
+  definitionFile: { id: number; name: string };
+  id: number;
+  owner: string;
+};
+
+export type PlanImportRequestStatus =
+  | 'complete'
+  | 'extracting_model'
+  | 'failed'
+  | 'importing_dataset'
+  | 'importing_plan';
+
 /**
  * Mirrors backend ValueSchema with the exception of the `secret` variant.
  */

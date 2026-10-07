@@ -1,6 +1,12 @@
 import fetch from 'node-fetch';
 import type { HasuraError } from '../../types/hasura.js';
-import type { ModelDeclaration, SerializedValue, SimulationResultsTransfer } from '../../types/plan-transfer.js';
+import type {
+  CreatedNonExecutableModel,
+  ModelDeclaration,
+  PlanImportRequestStatus,
+  SerializedValue,
+  SimulationResultsTransfer,
+} from '../../types/plan-transfer.js';
 import { generateJwt } from '../auth/functions.js';
 import { DbMerlin } from '../db/db.js';
 import { removeUploadedFile, storeUploadedFile } from '../files/store.js';
@@ -50,12 +56,6 @@ async function postMerlin(endpoint: string, body: Record<string, unknown>): Prom
     throw new Error(message ?? `merlin ${endpoint} failed with status ${response.status}.`);
   }
 }
-
-export type CreatedNonExecutableModel = {
-  definitionFile: { id: number; name: string };
-  id: number;
-  owner: string;
-};
 
 /**
  * Headers for a fresh short-lived gateway-signed token acting as `user` in `role`. Only admins may insert or delete
@@ -184,13 +184,6 @@ export async function waitForModelTypes(modelId: number, getHeaders: () => Recor
     await new Promise(resolve => setTimeout(resolve, MODEL_TYPE_REFRESH_POLL_MS));
   }
 }
-
-export type PlanImportRequestStatus =
-  | 'complete'
-  | 'extracting_model'
-  | 'failed'
-  | 'importing_dataset'
-  | 'importing_plan';
 
 /** Records a new import, whose (empty) plan exists. Clients follow the import through this row. */
 export async function createPlanImportRequest({
