@@ -125,8 +125,6 @@ export function updateSchemaWithDefs(defs: { event_types: any; source_type: any 
     };
   }
 
-  logger.info(JSON.stringify(localSchemaCopy));
-
   // Compile & return full schema with 'defs' added
   const localAjv = new Ajv();
   return localAjv.compile(localSchemaCopy);
@@ -571,5 +569,5 @@ export default (app: Express) => {
    *     tags:
    *       - Hasura
    */
-  app.post('/uploadExternalSource', upload.single('external_source_file'), refreshLimiter, auth, uploadExternalSource);
+  app.post('/uploadExternalSource', refreshLimiter, auth, upload.single('external_source_file'), uploadExternalSource);
 };

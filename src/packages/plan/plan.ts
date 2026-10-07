@@ -3,21 +3,23 @@ import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import { parse } from 'csv-parse';
 import fetch from 'node-fetch';
+import { unlink } from 'fs/promises';
+import { tmpdir } from 'os';
 import { Readable } from 'stream';
 
+import { getSessionVariables } from '../auth/functions.js';
 import { auth } from '../auth/middleware.js';
 import { parseJSONFile } from '../../util/fileParser.js';
 import { convertDateToDoy, getTimeDifference } from '../../util/time.js';
 import { HasuraError } from '../../types/hasura.js';
+import type { ActivityDirectiveTransfer, PlanTransfer } from '../../types/plan-transfer.js';
 import type {
-  ActivitiesJSON,
   ActivityDirective,
   ActivityDirectiveInsertInput,
   ImportPlanPayload,
   PlanInsertInput,
-  PlanSchema,
+  CreatedPlan,
   PlanTagsInsertInput,
-  PlanTransfer,
   Tag,
 } from '../../types/plan.js';
 import {
@@ -28,11 +30,27 @@ import {
   UploadPlanDatasetJSON,
   UploadPlanDatasetPayload,
 } from '../../types/dataset.js';
+import { parsePlanTransfer, remapResultDirectiveIds } from './plan-transfer.js';
+import {
+  createNonExecutableModel,
+  deleteNonExecutableModel,
+  createPlanImportRequest,
+  insertExternalSimulationDataset,
+  markPlanReadOnly,
+  postGraphQL,
+  setPlanImportRequestStatus,
+  tokenHeaders,
+  waitForModelTypes,
+} from './non-executable-import.js';
 import gql from './gql.js';
 import getLogger from '../../logger.js';
 import { getEnv } from '../../env.js';
 
 const upload = multer();
+// Plan files can embed large simulation results, so they are buffered to disk rather than memory.
+// note: the parsed file and the re-stringified results are still whole in memory, and V8 caps a string at ~512 MB,
+// so results past that fail; streaming `results` from the upload into the file store is the upgrade path.
+const planFileUpload = multer({ dest: tmpdir() });
 const logger = getLogger('packages/plan/plan');
 const { RATE_LIMITER_LOGIN_MAX, HASURA_API_URL } = getEnv();
 
@@ -50,101 +68,48 @@ const refreshLimiter = rateLimit({
 
 const timeColumnKey = 'time_utc';
 
+type Headers = Record<string, string> | (() => Record<string, string>);
+const resolveHeaders = (headers: Headers) => (typeof headers === 'function' ? headers() : headers);
+
 async function createActivities(
   activities: ActivityDirectiveInsertInput[],
-  activitiesJSON: ActivitiesJSON,
+  activitiesJSON: ActivityDirectiveTransfer[],
   planId: number,
-  headers: Record<string, string>,
-): Promise<number> {
+  headers: Headers,
+): Promise<Record<number, number>> {
   const activityRemap: Record<number, number> = {};
 
-  const createdActivitiesResponse = await fetch(GQL_API_URL, {
-    body: JSON.stringify({
-      query: gql.CREATE_ACTIVITY_DIRECTIVES,
-      variables: {
-        activityDirectivesInsertInput: activities,
-      },
-    }),
-    headers,
-    method: 'POST',
+  const { insert_activity_directive: inserted } = await postGraphQL<{
+    insert_activity_directive: { returning: ActivityDirective[] };
+  }>(gql.CREATE_ACTIVITY_DIRECTIVES, { activityDirectivesInsertInput: activities }, resolveHeaders(headers));
+  inserted.returning.forEach((createdActivity, index) => {
+    activityRemap[activitiesJSON[index].id] = createdActivity.id;
   });
 
-  const createdActivityDirectivesData = (await createdActivitiesResponse.json()) as {
-    data: {
-      insert_activity_directive: {
-        returning: ActivityDirective[];
-      };
-    };
-  } | null;
-
-  if (createdActivityDirectivesData) {
-    const {
-      data: {
-        insert_activity_directive: { returning: createdActivityDirectives },
-      },
-    } = createdActivityDirectivesData;
-
-    if (createdActivityDirectives.length === activities.length) {
-      createdActivityDirectives.forEach((createdActivityDirective, index) => {
-        const { id } = activitiesJSON[index];
-
-        activityRemap[id] = createdActivityDirective.id;
-      });
-    } else {
-      throw new Error('Activity insertion failed.');
-    }
-    // remap all the anchor ids to the newly created activity directives
-    logger.info(`POST /uploadActivities: Re-assigning anchors`);
-
-    const activityDirectivesSetInput = await remapAnchors(activitiesJSON, activityRemap, planId);
-
-    await fetch(GQL_API_URL, {
-      body: JSON.stringify({
-        query: gql.UPDATE_ACTIVITY_DIRECTIVES,
-        variables: {
-          updates: activityDirectivesSetInput,
-        },
-      }),
-      headers,
-      method: 'POST',
-    });
-
-    return activities.length;
+  logger.info(`POST /uploadActivities: Re-assigning anchors`);
+  const updates = await remapAnchors(activitiesJSON, activityRemap, planId);
+  // Hasura answers an empty `updates` with a single object rather than an array
+  if (updates.length === 0) {
+    return activityRemap;
   }
-  return 0;
+  const { update_activity_directive_many: updated } = await postGraphQL<{
+    update_activity_directive_many: { affected_rows: number }[];
+  }>(gql.UPDATE_ACTIVITY_DIRECTIVES, { updates }, resolveHeaders(headers));
+  if (updated.length !== updates.length || updated.some(({ affected_rows }) => affected_rows !== 1)) {
+    throw new Error('Not all activity anchors were updated.');
+  }
+
+  return activityRemap;
 }
 
 async function createTags(
-  activities: ActivitiesJSON,
-  headers: Record<string, string>,
+  activities: ActivityDirectiveTransfer[],
+  headers: Headers,
 ): Promise<{ createdTags: Tag[]; tagsMap: Record<string, Tag> }> {
   let createdTags: Tag[] = [];
-  const tagsResponse = await fetch(GQL_API_URL, {
-    body: JSON.stringify({
-      query: gql.GET_TAGS,
-    }),
-    headers,
-    method: 'POST',
-  });
-
-  const tagsResponseJSON = (await tagsResponse.json()) as {
-    data: {
-      tags: Tag[];
-    };
-  };
-
+  const { tags } = await postGraphQL<{ tags: Tag[] }>(gql.GET_TAGS, {}, resolveHeaders(headers));
   let tagsMap: Record<string, Tag> = {};
-  if (tagsResponseJSON != null && tagsResponseJSON.data != null) {
-    const {
-      data: { tags },
-    } = tagsResponseJSON;
-    tagsMap = tags.reduce((prevTagsMap: Record<string, Tag>, tag) => {
-      return {
-        ...prevTagsMap,
-        [tag.name]: tag,
-      };
-    }, {});
-  }
+  tagsMap = tags.reduce((prevTagsMap: Record<string, Tag>, tag) => ({ ...prevTagsMap, [tag.name]: tag }), {});
 
   // derive a map of uniquely named tags from the list of activities that doesn't already exist in the database
   const activityTags = activities.reduce(
@@ -172,25 +137,12 @@ async function createTags(
     {},
   );
 
-  const createdTagsResponse = await fetch(GQL_API_URL, {
-    body: JSON.stringify({
-      query: gql.CREATE_TAGS,
-      variables: { tags: Object.values(activityTags) },
-    }),
-    headers,
-    method: 'POST',
-  });
-
-  const { data } = (await createdTagsResponse.json()) as {
-    data: {
-      insert_tags: { returning: Tag[] };
-    };
-  };
-
-  if (data && data.insert_tags && data.insert_tags.returning.length) {
-    // track the newly created tags for cleanup if an error occurs during plan import
-    createdTags = data.insert_tags.returning;
-  }
+  const { insert_tags: inserted } = await postGraphQL<{ insert_tags: { returning: Tag[] } }>(
+    gql.CREATE_TAGS,
+    { tags: Object.values(activityTags) },
+    resolveHeaders(headers),
+  );
+  createdTags = inserted.returning;
 
   // add the newly created tags to the `tagsMap`
   tagsMap = createdTags.reduce(
@@ -204,7 +156,7 @@ async function createTags(
   return { createdTags, tagsMap };
 }
 
-async function remapActivities(activities: ActivitiesJSON, planId: number, tagsMap: Record<string, Tag>) {
+async function remapActivities(activities: ActivityDirectiveTransfer[], planId: number, tagsMap: Record<string, Tag>) {
   return activities.map(
     ({
       anchored_to_start: anchoredToStart,
@@ -237,7 +189,11 @@ async function remapActivities(activities: ActivitiesJSON, planId: number, tagsM
   );
 }
 
-async function remapAnchors(activities: ActivitiesJSON, activityRemap: Record<number, number>, planId: number) {
+async function remapAnchors(
+  activities: ActivityDirectiveTransfer[],
+  activityRemap: Record<number, number>,
+  planId: number,
+) {
   return activities
     .filter(({ anchor_id: anchorId }) => anchorId !== null)
     .map(({ anchor_id: anchorId, id }) => ({
@@ -246,7 +202,235 @@ async function remapAnchors(activities: ActivitiesJSON, activityRemap: Record<nu
     }));
 }
 
-async function importPlan(req: Request, res: Response) {
+type PlanContents = {
+  activities: ActivityDirectiveTransfer[];
+  /** The request's JSON array of plan tag ids. */
+  planTags: string;
+  simulationArguments: PlanTransfer['simulation_arguments'];
+  simulationTemplateId?: number;
+};
+
+/** Creates an empty plan. */
+async function createPlan(planInsertInput: PlanInsertInput, headers: Record<string, string>): Promise<CreatedPlan> {
+  logger.info(`POST /importPlan: Creating new plan: ${planInsertInput.name}`);
+  const { createPlan: createdPlan } = await postGraphQL<{ createPlan: CreatedPlan | null }>(
+    gql.CREATE_PLAN,
+    { plan: planInsertInput },
+    headers,
+  );
+  if (createdPlan == null) {
+    throw Error('Plan creation unsuccessful.');
+  }
+  return createdPlan;
+}
+
+/**
+ * Fills a new plan with simulation arguments, activities (and their tags) and plan tags. Returns the ids the activities were given, by their id in the file.
+ */
+async function fillPlan(
+  plan: CreatedPlan,
+  { activities, planTags, simulationArguments, simulationTemplateId }: PlanContents,
+  headers: Headers,
+): Promise<Record<number, number>> {
+  // 1. Set its simulation arguments.
+  logger.info(`POST /importPlan: Associating simulation parameters: plan ${plan.id}`);
+  const simulationInput = {
+    arguments: simulationArguments,
+    simulation_template_id: simulationTemplateId,
+  };
+
+  const { update_simulation: updatedSimulation } = await postGraphQL<{
+    update_simulation: { returning: { id: number }[] };
+  }>(gql.UPDATE_SIMULATION, { plan_id: plan.id, simulation: simulationInput }, resolveHeaders(headers));
+  if (updatedSimulation.returning.length === 0) {
+    throw new Error(`No simulation was updated for plan ${plan.id}.`);
+  }
+
+  // 2. Create missing activity tags, then the activities, then re-link their anchors.
+  logger.info(`POST /importPlan: Importing activities: plan ${plan.id}`);
+
+  const { tagsMap } = await createTags(activities, headers);
+
+  const activityDirectivesInsertInput = await remapActivities(activities, plan.id, tagsMap);
+
+  const activityIdMap = await createActivities(activityDirectivesInsertInput, activities, plan.id, headers);
+
+  // 3. Attach the plan tags.
+  logger.info(`POST /importPlan: Importing plan tags: plan ${plan.id}`);
+  const parsedTags: number[] = JSON.parse(planTags);
+
+  const tagsInsert: PlanTagsInsertInput[] = parsedTags.map(tagId => ({
+    plan_id: plan.id,
+    tag_id: tagId,
+  }));
+
+  await postGraphQL(gql.CREATE_PLAN_TAGS, { tags: tagsInsert }, resolveHeaders(headers));
+
+  return activityIdMap;
+}
+
+/**
+ * Being able to create a plan is what permits the whole self-contained import, including the non-executable model
+ * created for it. Hasura shows a role only the mutations it may run, so this asks Hasura, as the caller, whether
+ * `insert_plan_one` is among them, rather than repeating Hasura's permission rules here.
+ */
+async function assertCanCreatePlan(headers: Record<string, string>): Promise<void> {
+  const { __type: mutationRoot } = await postGraphQL<{ __type: { fields: { name: string }[] } | null }>(
+    gql.GET_MUTATION_ROOT_FIELDS,
+    {},
+    headers,
+  );
+
+  if (!mutationRoot?.fields.some(({ name }) => name === 'insert_plan_one')) {
+    throw new Error('You do not have permission to create a plan.');
+  }
+}
+
+async function assertPlanNameAvailable(name: string, headers: Record<string, string>): Promise<void> {
+  const { plan } = await postGraphQL<{ plan: { id: number }[] }>(gql.GET_PLAN_BY_NAME, { name }, headers);
+
+  if (plan.length > 0) {
+    throw new Error(`Plan name "${name}" is already in use.`);
+  }
+}
+
+/** An import once its (empty) plan and import request exist. */
+type StartedImport = {
+  modelId: number;
+  plan: CreatedPlan;
+  requestId: number;
+  requester: string;
+  role: string;
+  simulationTemplateId?: number;
+  transfer: PlanTransfer;
+};
+
+/**
+ * Creates an empty plan and a `plan_import_request` row to track the rest (see `finishImport`). A file that embeds its
+ * model is imported onto a new non-executable model, created first.
+ */
+async function startImport(
+  transfer: PlanTransfer,
+  { duration, model_id, name, simulation_template_id, start_time }: ImportPlanPayload,
+  headers: Record<string, string>,
+): Promise<StartedImport> {
+  // The admin-token model insert and merlin trust the requester they are given, so it comes from the verified token,
+  // not `x-hasura-user-id`.
+  const { 'x-hasura-role': role, 'x-hasura-user-id': requester } = getSessionVariables(
+    headers.Authorization,
+    headers['x-hasura-role'],
+  );
+  const { model } = transfer;
+
+  let modelId: number;
+  let plan: CreatedPlan;
+  if (model === undefined) {
+    plan = await createPlan({ duration, model_id, name, start_time }, headers);
+    // multipart form fields arrive as strings
+    modelId = Number(model_id);
+  } else {
+    // model-free plan includes `model` field in JSON *instead* of a JAR model
+    // Refuse a caller who can't create plans, or a taken name, before creating a model for them.
+    const planName = name || transfer.name;
+    await assertCanCreatePlan(headers);
+    await assertPlanNameAvailable(planName, headers);
+
+    logger.info(`POST /importPlan: Creating non-executable model: ${planName}`);
+    const createdModel = await createNonExecutableModel(model, { name: planName, owner: requester });
+    modelId = createdModel.id;
+    try {
+      plan = await createPlan(
+        { duration: transfer.duration, model_id: modelId, name: planName, start_time: transfer.start_time },
+        headers,
+      );
+    } catch (error) {
+      // with no plan, the user has nothing to delete the model through
+      await deleteNonExecutableModel(createdModel).catch(deleteError => logger.error(deleteError));
+      throw error;
+    }
+  }
+
+  const requestId = await createPlanImportRequest({
+    modelId,
+    planId: plan.id,
+    requester,
+    status: model === undefined ? 'importing_plan' : 'extracting_model',
+  });
+
+  return {
+    modelId,
+    plan,
+    requestId,
+    requester,
+    role,
+    simulationTemplateId: model === undefined ? simulation_template_id : undefined,
+    transfer,
+  };
+}
+
+/**
+ * The rest of an import, after `/importPlan` has responded: fills the plan and, for a self-contained import, first
+ * waits for the model's types, then makes the plan read-only and has merlin ingest the results. A failure marks the
+ * request failed and keeps the plan for the user to delete.
+ */
+async function finishImport(
+  { modelId, plan, requestId, requester, role, simulationTemplateId, transfer }: StartedImport,
+  planTags: string,
+): Promise<void> {
+  const selfContained = transfer.model !== undefined;
+  const getHeaders = () => tokenHeaders(requester, role);
+  try {
+    if (selfContained) {
+      logger.info(`POST /importPlan: Waiting for model types to be registered: request ${requestId}`);
+      await waitForModelTypes(modelId, getHeaders);
+      await setPlanImportRequestStatus(requestId, 'importing_plan');
+    }
+
+    const activityIdMap = await fillPlan(
+      plan,
+      {
+        activities: transfer.activities,
+        planTags,
+        simulationArguments: transfer.simulation_arguments,
+        simulationTemplateId,
+      },
+      getHeaders,
+    );
+
+    if (selfContained) {
+      logger.info(`POST /importPlan: Marking plan read-only: request ${requestId}`);
+      await markPlanReadOnly(plan.id);
+    }
+
+    if (transfer.results === undefined) {
+      await setPlanImportRequestStatus(requestId, 'complete');
+    } else {
+      // merlin marks the request complete or failed once it has ingested the results
+      await setPlanImportRequestStatus(requestId, 'importing_dataset');
+      logger.info(`POST /importPlan: Ingesting simulation results: request ${requestId}`);
+      await insertExternalSimulationDataset({
+        planDuration: transfer.duration,
+        planId: plan.id,
+        planImportRequestId: requestId,
+        planStartTime: transfer.start_time,
+        requester,
+        results: remapResultDirectiveIds(transfer.results, activityIdMap),
+        simulationArguments: transfer.simulation_arguments,
+      });
+    }
+
+    logger.info(`POST /importPlan: Imported plan: request ${requestId}`);
+  } catch (error) {
+    logger.error(`POST /importPlan: Import request ${requestId} failed`);
+    logger.error(error);
+    await setPlanImportRequestStatus(requestId, 'failed', error).catch(e => logger.error(e));
+    if (selfContained) {
+      await markPlanReadOnly(plan.id).catch(e => logger.error(e));
+    }
+  }
+}
+
+export async function importPlan(req: Request, res: Response) {
   const authorizationHeader = req.get('authorization');
 
   const {
@@ -254,119 +438,41 @@ async function importPlan(req: Request, res: Response) {
   } = req;
 
   const { body, file } = req;
-  const { name, model_id, start_time, duration, simulation_template_id, tags } = body as ImportPlanPayload;
+  const payload = body as ImportPlanPayload;
 
-  logger.info(`POST /importPlan: Importing plan: ${name}`);
+  logger.info(`POST /importPlan: Importing plan: ${payload.name}`);
 
-  const headers: HeadersInit = {
+  const headers: Record<string, string> = {
     Authorization: authorizationHeader ?? '',
     'Content-Type': 'application/json',
     'x-hasura-role': roleHeader ? `${roleHeader}` : '',
     'x-hasura-user-id': userHeader ? `${userHeader}` : '',
   };
 
-  let createdPlan: PlanSchema | null = null;
-
-  let createdTags: Tag[] = [];
-  let tagsMap: Record<string, Tag>;
-
   try {
-    const { activities, simulation_arguments }: PlanTransfer = await parseJSONFile<PlanTransfer>(file);
+    // 1. Parse the file and migrate it to PlanTransfer v3.
+    const transfer = parsePlanTransfer(await parseJSONFile<unknown>(file));
 
-    // create the new plan first
-    logger.info(`POST /importPlan: Creating new plan: ${name}`);
-    const planInsertInput: PlanInsertInput = {
-      duration,
-      model_id,
-      name,
-      start_time,
-    };
-    const planCreationResponse = await fetch(GQL_API_URL, {
-      body: JSON.stringify({ query: gql.CREATE_PLAN, variables: { plan: planInsertInput } }),
-      headers,
-      method: 'POST',
-    });
+    // 2. Create the plan (and any model), and respond with the import request tracking the rest.
+    const started = await startImport(transfer, payload, headers);
 
-    const planCreationResponseJSON = (await planCreationResponse.json()) as {
-      data: {
-        createPlan: any;
-      };
-    };
+    logger.info(`POST /importPlan: Started import request ${started.requestId}`);
+    res.status(202);
+    res.json({ model_id: started.modelId, plan_id: started.plan.id, plan_import_request_id: started.requestId });
 
-    if (planCreationResponseJSON != null && planCreationResponseJSON.data != null) {
-      createdPlan = planCreationResponseJSON.data.createPlan;
-
-      if (createdPlan) {
-        // associate specified simulation parameters to new plan
-        logger.info(`POST /importPlan: Associating simulation parameters: ${name}`);
-        const simulationInput = {
-          arguments: simulation_arguments,
-          simulation_template_id,
-        };
-
-        await fetch(GQL_API_URL, {
-          body: JSON.stringify({
-            query: gql.UPDATE_SIMULATION,
-            variables: { plan_id: createdPlan.id, simulation: simulationInput },
-          }),
-          headers,
-          method: 'POST',
-        });
-
-        // insert all the imported activities into the plan
-        logger.info(`POST /importPlan: Importing activities: ${name}`);
-
-        const tagData = await createTags(activities, headers as Record<string, string>);
-        createdTags = tagData.createdTags;
-        tagsMap = tagData.tagsMap;
-
-        const activityDirectivesInsertInput = await remapActivities(activities, createdPlan.id, tagsMap);
-
-        await createActivities(activityDirectivesInsertInput, activities, (createdPlan as PlanSchema).id, headers);
-
-        // associate the tags with the newly created plan
-        logger.info(`POST /importPlan: Importing plan tags: ${name}`);
-        const parsedTags: number[] = JSON.parse(tags);
-
-        const tagsInsert: PlanTagsInsertInput[] = parsedTags.map(tagId => ({
-          plan_id: (createdPlan as PlanSchema).id,
-          tag_id: tagId,
-        }));
-
-        await fetch(GQL_API_URL, {
-          body: JSON.stringify({ query: gql.CREATE_PLAN_TAGS, variables: { tags: tagsInsert } }),
-          headers,
-          method: 'POST',
-        });
-
-        logger.info(`POST /importPlan: Imported plan: ${name}`);
-      }
-      res.json(createdPlan);
-    } else {
-      throw Error('Plan creation unsuccessful.');
-    }
+    // 3. Finish in the background; awaited only so the temporary upload is removed afterwards.
+    await finishImport(started, payload.tags ?? '[]');
   } catch (error) {
-    logger.error(`POST /importPlan: Error occurred during plan ${name} import`);
+    logger.error(`POST /importPlan: Error occurred during plan ${payload.name} import`);
     logger.error(error);
 
-    // cleanup the imported plan if it failed along the way
-    if (createdPlan) {
-      // delete the plan - activities associated to the plan will be automatically cleaned up
-      await fetch(GQL_API_URL, {
-        body: JSON.stringify({ query: gql.DELETE_PLAN, variables: { id: createdPlan.id } }),
-        headers,
-        method: 'POST',
-      });
-
-      // if any activity tags were created as a result of this import, remove them
-      await fetch(GQL_API_URL, {
-        body: JSON.stringify({ query: gql.DELETE_TAGS, variables: { tagIds: createdTags.map(({ id }) => id) } }),
-        headers,
-        method: 'POST',
-      });
-    }
     res.status(500);
     res.send((error as Error).message);
+  } finally {
+    // plan files are uploaded to temporary disk storage
+    if (file?.path) {
+      await unlink(file.path).catch(error => logger.error(error));
+    }
   }
 }
 
@@ -408,7 +514,9 @@ async function uploadActivities(req: Request, res: Response) {
   let tagsMap: Record<string, Tag>;
 
   try {
-    const { activities: activitiesJSON }: PlanTransfer = await parseJSONFile<PlanTransfer>(file); // Activites upload is a subset of plan import
+    // Activity upload consumes only directives, so it is not part of the plan
+    // version migration; the file is read as-is, as it always has been.
+    const { activities: activitiesJSON } = await parseJSONFile<{ activities: ActivityDirectiveTransfer[] }>(file);
 
     const tagData = await createTags(activitiesJSON, headers as Record<string, string>);
     createdTags = tagData.createdTags;
@@ -416,11 +524,11 @@ async function uploadActivities(req: Request, res: Response) {
 
     const activities = await remapActivities(activitiesJSON, parseInt(planIdString), tagsMap);
 
-    const activitiesCreated = await createActivities(activities, activitiesJSON, parseInt(planIdString), headers);
+    const activityIdMap = await createActivities(activities, activitiesJSON, parseInt(planIdString), headers);
 
     logger.info(`POST /uploadActivities: Uploaded activities`);
 
-    res.json(activitiesCreated);
+    res.json(Object.keys(activityIdMap).length);
   } catch (error) {
     // TODO: Handle cleanup on fail, need to delete tags if they were created
     if (createdTags !== undefined && createdTags.length) {
@@ -565,7 +673,7 @@ async function uploadDataset(req: Request, res: Response) {
                             ...previousSegments,
                             { duration, ...(value !== undefined ? { dynamics: parseFloat(value) } : {}) },
                           ],
-                        },
+                        } as ProfileSet,
                       };
                     },
                     previousPlanDataset.profileSet,
@@ -625,7 +733,7 @@ async function uploadDataset(req: Request, res: Response) {
         createdDatasetId = (addExternalDatasetResponse as AddExternalDatasetResponse).data.addExternalDataset
           ?.datasetId;
 
-        // Repeat as long as the is at least one profile with a segment left
+        // Repeat as long as there is at least one profile with a segment left
         while (profileHasSegments(profileSet)) {
           // Initialize profile payload
           let currentProfileSet: ProfileSets = initialProfileSet;
@@ -746,17 +854,24 @@ export default (app: Express) => {
    *              tags:
    *                type: string
    *     responses:
-   *       200:
-   *         description: ImportResponse
+   *       202:
+   *         description: >
+   *           `{ plan_import_request_id, plan_id, model_id }` once the plan exists. The import continues in the
+   *           background; follow its `plan_import_request` row for its status.
    *       403:
    *         description: Unauthorized error
    *       401:
    *         description: Unauthenticated error
    *     summary: Import a plan JSON file
+   *     description: >
+   *       Imports a PlanTransfer file (v2, versionless or v3). When the file embeds a `model`, the plan is imported
+   *       read-only on a new non-executable model, with any recorded `results` as its simulation dataset. In that case
+   *       `model_id`, `start_time`, `duration` and `simulation_template_id` are ignored and `name` defaults to the
+   *       file's plan name.
    *     tags:
    *       - Hasura
    */
-  app.post('/importPlan', upload.single('plan_file'), refreshLimiter, auth, importPlan);
+  app.post('/importPlan', refreshLimiter, auth, planFileUpload.single('plan_file'), importPlan);
 
   /**
    * @swagger
@@ -798,7 +913,7 @@ export default (app: Express) => {
    *     tags:
    *       - Hasura
    */
-  app.post('/uploadDataset', upload.single('external_dataset'), refreshLimiter, auth, uploadDataset);
+  app.post('/uploadDataset', refreshLimiter, auth, upload.single('external_dataset'), uploadDataset);
 
   /**
    * @swagger
@@ -838,5 +953,5 @@ export default (app: Express) => {
    *     tags:
    *       - Hasura
    */
-  app.post('/uploadActivities', upload.single('activity_file'), refreshLimiter, auth, uploadActivities);
+  app.post('/uploadActivities', refreshLimiter, auth, upload.single('activity_file'), uploadActivities);
 };
