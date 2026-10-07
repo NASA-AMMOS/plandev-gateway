@@ -93,9 +93,7 @@ function assertSpansConsistent({ activities, results }: PlanTransfer): void {
     }
     const otherSpan = spanOfDirective.get(directive_id);
     if (otherSpan !== undefined) {
-      throw new Error(
-        `Result spans ${otherSpan} and ${span_id} both reference directive ${directive_id}.`,
-      );
+      throw new Error(`Result spans ${otherSpan} and ${span_id} both reference directive ${directive_id}.`);
     }
     spanOfDirective.set(directive_id, span_id);
   }
@@ -106,9 +104,7 @@ function assertSpansConsistent({ activities, results }: PlanTransfer): void {
     const chain = new Set<number>();
     for (let id: number | undefined = start; id !== undefined && !reachesRoot.has(id); id = parentOf.get(id)) {
       if (!parentOf.has(id)) {
-        throw new Error(
-          `A result span's parent_id references span ${id}, which is not in the results.`,
-        );
+        throw new Error(`A result span's parent_id references span ${id}, which is not in the results.`);
       }
       if (chain.has(id)) {
         throw new Error(`Result span ${id}'s parent_id chain loops back on itself.`);
