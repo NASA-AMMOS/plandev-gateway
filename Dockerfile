@@ -1,4 +1,4 @@
-FROM node:24.19.0-alpine AS gateway-node-builder
+FROM node:24.22.1-alpine AS gateway-node-builder
 
 WORKDIR /app
 
