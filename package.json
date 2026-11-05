@@ -1,7 +1,7 @@
 {
   "name": "plandev-gateway",
   "description": "The API gateway for PlanDev.",
-  "version": "4.4.0",
+  "version": "4.5.0",
   "type": "module",
   "license": "MIT",
   "private": true,
