@@ -7,14 +7,23 @@ export type JwtDecode = {
   jwtPayload: JwtPayload | null;
 };
 
+// JWT payload with configurable claims namespace
+// The namespace key is dynamic (configured via JWT_CLAIMS_NAMESPACE)
 export type JwtPayload = {
-  'https://hasura.io/jwt/claims': Record<string, string | string[]>;
+  [namespace: string]: Record<string, string | string[]> | string;
   username: string;
 };
 
 export type JwtSecret = {
-  key: string;
   type: string;
+
+  // either key or jwk_url
+  key?: string;
+  jwk_url?: string;
+
+  // optional validation fields (used with JWKS/OIDC)
+  issuer?: string;
+  audience?: string | string[];
 };
 
 export type AuthResponse = {
