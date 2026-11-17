@@ -17,6 +17,7 @@ import cookieParser from 'cookie-parser';
 import { AuthAdapter } from './types/auth.js';
 import { NoAuthAdapter } from './packages/auth/adapters/NoAuthAdapter.js';
 import { CAMAuthAdapter } from './packages/auth/adapters/CAMAuthAdapter.js';
+import { SSO2AuthAdapter } from './packages/auth/adapters/SSO2AuthAdapter.js';
 import { validateGroupRoleMappings } from './packages/auth/functions.js';
 
 async function main(): Promise<void> {
@@ -39,6 +40,10 @@ async function main(): Promise<void> {
     case 'cam':
       validateGroupRoleMappings();
       authHandler = CAMAuthAdapter;
+      break;
+    case 'sso2':
+      validateGroupRoleMappings();
+      authHandler = SSO2AuthAdapter;
       break;
     default:
       throw new Error(`invalid auth type env var: ${AUTH_TYPE}`);
