@@ -52,7 +52,7 @@ export default (app: Express) => {
    *       - Hasura
    */
   app.post('/modelExtraction', refreshLimiter, adminOnlyAuth, async (req, res) => {
-    const { jwtPayload } = decodeJwt(req.get('authorization'));
+    const { jwtPayload } = await decodeJwt(req.get('authorization'));
     const username = jwtPayload?.username as string;
 
     const { body } = req;
